@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"crypto/rand"
@@ -8,6 +8,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"giteeai2api/internal/config"
+	"giteeai2api/internal/store"
 )
 
 // APIKey 下游客户端调用本服务使用的密钥
@@ -22,18 +25,18 @@ type APIKey struct {
 }
 
 type KeyStore struct {
-	store  *Store
+	store  *store.Store
 	static map[string]bool
 	mu     sync.RWMutex
 	keys   map[string]*APIKey
 }
 
-func newKeyStore(cfg *Config, s *Store) *KeyStore {
+func New(cfg *config.Config, s *store.Store) *KeyStore {
 	ks := &KeyStore{store: s, static: map[string]bool{}, keys: map[string]*APIKey{}}
 	for _, k := range cfg.APIKeys {
 		ks.static[k] = true
 	}
-	rows, err := s.r.Query(`SELECT id,name,key,enabled,used_total,last_used_at,created_at FROM api_keys`)
+	rows, err := s.R.Query(`SELECT id,name,key,enabled,used_total,last_used_at,created_at FROM api_keys`)
 	if err != nil {
 		panic(err)
 	}
@@ -46,7 +49,6 @@ func newKeyStore(cfg *Config, s *Store) *KeyStore {
 	return ks
 }
 
-// Auth 校验 Bearer 密钥，返回密钥 ID（环境变量静态密钥为 0）
 func (ks *KeyStore) Auth(r *http.Request) (int64, bool) {
 	key := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	if key == "" {
@@ -68,7 +70,7 @@ func (ks *KeyStore) Auth(r *http.Request) (int64, bool) {
 	k.LastUsedAt = time.Now().Unix()
 	id, used, last := k.ID, k.UsedTotal, k.LastUsedAt
 	ks.store.Async(func(tx *sql.Tx) {
-		execTx(tx, `UPDATE api_keys SET used_total=?,last_used_at=? WHERE id=?`, used, last, id)
+		store.ExecTx(tx, `UPDATE api_keys SET used_total=?,last_used_at=? WHERE id=?`, used, last, id)
 	})
 	return id, true
 }
@@ -87,7 +89,7 @@ func (ks *KeyStore) Create(name string) (*APIKey, error) {
 	b := make([]byte, 24)
 	rand.Read(b)
 	k := &APIKey{Name: name, Key: "sk-" + hex.EncodeToString(b), Enabled: true, CreatedAt: time.Now().Unix()}
-	res, err := ks.store.w.Exec(`INSERT INTO api_keys(name,key,created_at) VALUES(?,?,?)`, k.Name, k.Key, k.CreatedAt)
+	res, err := ks.store.W.Exec(`INSERT INTO api_keys(name,key,created_at) VALUES(?,?,?)`, k.Name, k.Key, k.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +112,9 @@ func (ks *KeyStore) Update(id int64, name *string, enabled *bool) bool {
 				k.Enabled = *enabled
 			}
 			n, e := k.Name, k.Enabled
-			ks.store.Async(func(tx *sql.Tx) { execTx(tx, `UPDATE api_keys SET name=?,enabled=? WHERE id=?`, n, e, id) })
+			ks.store.Async(func(tx *sql.Tx) {
+				store.ExecTx(tx, `UPDATE api_keys SET name=?,enabled=? WHERE id=?`, n, e, id)
+			})
 			return true
 		}
 	}
@@ -123,7 +127,9 @@ func (ks *KeyStore) Delete(id int64) bool {
 	for key, k := range ks.keys {
 		if k.ID == id {
 			delete(ks.keys, key)
-			ks.store.Async(func(tx *sql.Tx) { execTx(tx, `DELETE FROM api_keys WHERE id=?`, id) })
+			ks.store.Async(func(tx *sql.Tx) {
+				store.ExecTx(tx, `DELETE FROM api_keys WHERE id=?`, id)
+			})
 			return true
 		}
 	}

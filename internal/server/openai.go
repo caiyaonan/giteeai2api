@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -20,46 +20,36 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"giteeai2api/internal/pool"
+	"giteeai2api/internal/store"
+	"giteeai2api/internal/upstream"
 )
 
-// ImageReq 兼容 OpenAI Images API（gpt-image-2 / gpt-image-1 / dall-e-3）的请求体，
-// 另支持 negative_prompt / num_inference_steps / guidance_scale / seed 扩展字段。
 type ImageReq struct {
-	Model             string   `json:"model"`
-	Prompt            string   `json:"prompt"`
-	N                 int      `json:"n"`
-	Size              string   `json:"size"`
-	Quality           string   `json:"quality"`
-	ResponseFormat    string   `json:"response_format"`
-	OutputFormat      string   `json:"output_format"`
-	OutputCompression *int     `json:"output_compression"`
-	Background        string   `json:"background"`
-	Stream            bool     `json:"stream"`
-	PartialImages     int      `json:"partial_images"`
-	Moderation        string   `json:"moderation"`
-	Style             string   `json:"style"`
-	User              string   `json:"user"`
-	NegativePrompt    string   `json:"negative_prompt"`
-	Steps             int      `json:"num_inference_steps"`
-	GuidanceScale     *float64 `json:"guidance_scale"`
-	Seed              *int64   `json:"seed"`
-	// edits 的 JSON 形式
-	Images []json.RawMessage `json:"images"`
-	Mask   json.RawMessage   `json:"mask"`
+	Model             string            `json:"model"`
+	Prompt            string            `json:"prompt"`
+	N                 int               `json:"n"`
+	Size              string            `json:"size"`
+	Quality           string            `json:"quality"`
+	ResponseFormat    string            `json:"response_format"`
+	OutputFormat      string            `json:"output_format"`
+	OutputCompression *int              `json:"output_compression"`
+	Background        string            `json:"background"`
+	Stream            bool              `json:"stream"`
+	PartialImages     int               `json:"partial_images"`
+	Moderation        string            `json:"moderation"`
+	Style             string            `json:"style"`
+	User              string            `json:"user"`
+	NegativePrompt    string            `json:"negative_prompt"`
+	Steps             int               `json:"num_inference_steps"`
+	GuidanceScale     *float64          `json:"guidance_scale"`
+	Seed              *int64            `json:"seed"`
+	Images            []json.RawMessage `json:"images"`
+	Mask              json.RawMessage   `json:"mask"`
 
 	width, height int
 }
-
-type App struct {
-	cfg    *Config
-	store  *Store
-	pool   *Pool
-	up     *Upstream
-	keys   *KeyStore
-	secret []byte
-}
-
-// ---------- 错误输出（OpenAI 格式） ----------
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -81,14 +71,14 @@ func nilIfEmpty(s string) any {
 }
 
 func errInfo(err error) (status int, typ, code, msg string) {
-	var ue *UpErr
+	var ue *upstream.Error
 	switch {
-	case errors.Is(err, ErrNoToken):
+	case errors.Is(err, pool.ErrNoToken):
 		return 503, "server_error", "no_available_token", "No available upstream token, please try again later."
-	case errors.Is(err, ErrBusy):
+	case errors.Is(err, pool.ErrBusy):
 		return 429, "rate_limit_error", "rate_limit_exceeded", "Server is busy, please retry later."
 	case errors.As(err, &ue):
-		if ue.Out == OutClient {
+		if ue.Out == pool.OutClient {
 			st := ue.Status
 			if st < 400 || st >= 500 {
 				st = 400
@@ -102,9 +92,7 @@ func errInfo(err error) (status int, typ, code, msg string) {
 	return 500, "server_error", "", err.Error()
 }
 
-// ---------- 参数规范化 ----------
-
-func (a *App) normalize(r *ImageReq) error {
+func (s *Server) normalize(r *ImageReq) error {
 	r.Prompt = strings.TrimSpace(r.Prompt)
 	if r.Prompt == "" {
 		return errors.New("'prompt' is required")
@@ -123,7 +111,7 @@ func (a *App) normalize(r *ImageReq) error {
 	}
 	switch r.Quality {
 	case "", "auto", "standard":
-		r.Quality = "medium" // auto 取 medium，兼顾速度与质量
+		r.Quality = "medium"
 	case "hd":
 		r.Quality = "high"
 	case "low", "medium", "high":
@@ -146,53 +134,50 @@ func (a *App) normalize(r *ImageReq) error {
 		return fmt.Errorf("invalid 'output_format': %q", r.OutputFormat)
 	}
 	if r.Background == "" || r.Background == "auto" || r.Background == "transparent" {
-		r.Background = "opaque" // 上游不支持透明背景
+		r.Background = "opaque"
 	}
 	if r.Steps <= 0 {
-		r.Steps = a.cfg.QualitySteps[r.Quality]
+		r.Steps = s.cfg.QualitySteps[r.Quality]
 	}
 	if r.NegativePrompt == "" {
-		r.NegativePrompt = a.cfg.DefaultNegative
+		r.NegativePrompt = s.cfg.DefaultNegative
 	}
 	var err error
-	r.width, r.height, err = a.parseSize(r.Size)
+	r.width, r.height, err = s.parseSize(r.Size)
 	return err
 }
 
-// parseSize 支持 auto / WxH；自动按 16 对齐并等比缩放到 MAX_SIDE 以内
-func (a *App) parseSize(s string) (int, int, error) {
-	s = strings.ToLower(strings.TrimSpace(s))
-	if s == "" || s == "auto" {
-		s = a.cfg.DefaultSize
+func (s *Server) parseSize(raw string) (int, int, error) {
+	str := strings.ToLower(strings.TrimSpace(raw))
+	if str == "" || str == "auto" {
+		str = s.cfg.DefaultSize
 	}
-	s = strings.NewReplacer("*", "x", "×", "x", " ", "").Replace(s)
-	ws, hs, ok := strings.Cut(s, "x")
+	str = strings.NewReplacer("*", "x", "×", "x", " ", "").Replace(str)
+	ws, hs, ok := strings.Cut(str, "x")
 	w, e1 := strconv.Atoi(ws)
 	h, e2 := strconv.Atoi(hs)
 	if !ok || e1 != nil || e2 != nil || w <= 0 || h <= 0 {
-		return 0, 0, fmt.Errorf("invalid 'size': %q, expected format like 1024x1024 or auto", s)
+		return 0, 0, fmt.Errorf("invalid 'size': %q, expected format like 1024x1024 or auto", str)
 	}
 	if r := float64(max(w, h)) / float64(min(w, h)); r > 3 {
 		return 0, 0, errors.New("invalid 'size': aspect ratio must not exceed 3:1")
 	}
-	if m := max(w, h); m > a.cfg.MaxSide {
-		w, h = w*a.cfg.MaxSide/m, h*a.cfg.MaxSide/m
+	if m := max(w, h); m > s.cfg.MaxSide {
+		w, h = w*s.cfg.MaxSide/m, h*s.cfg.MaxSide/m
 	}
 	align := func(v int) int { return max((v+8)/16*16, 256) }
 	return align(w), align(h), nil
 }
 
-func (a *App) upstreamModel(m string, edit bool) string {
-	if mapped, ok := a.cfg.ModelMap[m]; ok {
+func (s *Server) upstreamModel(m string, edit bool) string {
+	if mapped, ok := s.cfg.ModelMap[m]; ok {
 		if edit {
-			return a.cfg.EditModel
+			return s.cfg.EditModel
 		}
 		return mapped
 	}
 	return m
 }
-
-// ---------- 用量估算（模拟 gpt-image 计费口径） ----------
 
 func estimateUsage(r *ImageReq, images, inputImages int) map[string]any {
 	text := (len(r.Prompt) + 3) / 4
@@ -207,16 +192,14 @@ func estimateUsage(r *ImageReq, images, inputImages int) map[string]any {
 	}
 }
 
-// ---------- 令牌池调度：失败自动换令牌重试 ----------
-
 type callFn func(ctx context.Context, token string) ([]byte, error)
 
-func (a *App) withToken(ctx context.Context, call callFn) (img []byte, tokenID int64, attempts int, err error) {
+func (s *Server) withToken(ctx context.Context, call callFn) (img []byte, tokenID int64, attempts int, err error) {
 	tried := map[int64]bool{}
-	for attempts < a.cfg.MaxRetries+1 {
-		t, e := a.pool.Acquire(ctx, tried)
+	for attempts < s.cfg.MaxRetries+1 {
+		t, e := s.pool.Acquire(ctx, tried)
 		if e != nil {
-			if err == nil { // 已有上游错误时保留更具体的上游错误
+			if err == nil {
 				err = e
 			}
 			return
@@ -225,14 +208,14 @@ func (a *App) withToken(ctx context.Context, call callFn) (img []byte, tokenID i
 		tokenID = t.ID
 		b, e := call(ctx, t.Value)
 		if e == nil {
-			a.pool.Release(t, OutOK, "")
+			s.pool.Release(t, pool.OutOK, "")
 			return b, tokenID, attempts, nil
 		}
-		var ue *UpErr
+		var ue *upstream.Error
 		if !errors.As(e, &ue) {
-			ue = &UpErr{Status: 502, Msg: e.Error(), Out: OutTransient}
+			ue = &upstream.Error{Status: 502, Msg: e.Error(), Out: pool.OutTransient}
 		}
-		a.pool.Release(t, ue.Out, ue.Msg)
+		s.pool.Release(t, ue.Out, ue.Msg)
 		err = ue
 		if !ue.Retryable() {
 			return
@@ -243,11 +226,11 @@ func (a *App) withToken(ctx context.Context, call callFn) (img []byte, tokenID i
 }
 
 type logMeta struct {
-	keyID     int64
-	endpoint  string
-	model     string
-	upstream  string
-	size      string
+	keyID    int64
+	endpoint string
+	model    string
+	upstream string
+	size     string
 }
 
 type result struct {
@@ -256,8 +239,7 @@ type result struct {
 	err    error
 }
 
-// runJobs 并发执行 n 张图，每完成一张回调 onDone（用于流式输出）
-func (a *App) runJobs(ctx context.Context, r *ImageReq, meta logMeta, call callFn, onDone func(int, result)) []result {
+func (s *Server) runJobs(ctx context.Context, r *ImageReq, meta logMeta, call callFn, onDone func(int, result)) []result {
 	res := make([]result, r.N)
 	var wg sync.WaitGroup
 	for i := 0; i < r.N; i++ {
@@ -265,12 +247,12 @@ func (a *App) runJobs(ctx context.Context, r *ImageReq, meta logMeta, call callF
 		go func(i int) {
 			defer wg.Done()
 			start := time.Now()
-			img, tokenID, attempts, err := a.withToken(ctx, call)
+			img, tokenID, attempts, err := s.withToken(ctx, call)
 			rs := result{err: err}
 			if err == nil {
 				rs.data, rs.format = convertImage(img, r.OutputFormat, r.OutputCompression)
 			}
-			a.logReq(meta, tokenID, attempts, time.Since(start), err)
+			s.logReq(meta, tokenID, attempts, time.Since(start), err)
 			res[i] = rs
 			if onDone != nil {
 				onDone(i, rs)
@@ -281,24 +263,22 @@ func (a *App) runJobs(ctx context.Context, r *ImageReq, meta logMeta, call callF
 	return res
 }
 
-func (a *App) logReq(m logMeta, tokenID int64, attempts int, d time.Duration, err error) {
+func (s *Server) logReq(m logMeta, tokenID int64, attempts int, d time.Duration, err error) {
 	status, errMsg := 200, ""
 	if err != nil {
 		status, _, _, errMsg = errInfo(err)
 	}
 	ts := time.Now().Unix()
-	a.store.Async(func(tx *sql.Tx) {
-		execTx(tx, `INSERT INTO logs(ts,key_id,token_id,endpoint,model,upstream_model,size,status,latency_ms,attempts,error)
+	s.store.Async(func(tx *sql.Tx) {
+		store.ExecTx(tx, `INSERT INTO logs(ts,key_id,token_id,endpoint,model,upstream_model,size,status,latency_ms,attempts,error)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?)`, ts, m.keyID, tokenID, m.endpoint, m.model, m.upstream, m.size,
 			status, d.Milliseconds(), attempts, truncate(errMsg, 500))
 	})
 }
 
-// ---------- 输出 ----------
-
-func (a *App) baseURL(r *http.Request) string {
-	if a.cfg.PublicBaseURL != "" {
-		return a.cfg.PublicBaseURL
+func (s *Server) baseURL(r *http.Request) string {
+	if s.cfg.PublicBaseURL != "" {
+		return s.cfg.PublicBaseURL
 	}
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
@@ -311,16 +291,16 @@ func (a *App) baseURL(r *http.Request) string {
 	return scheme + "://" + host
 }
 
-func (a *App) imageItem(hr *http.Request, r *ImageReq, rs result) (map[string]any, error) {
+func (s *Server) imageItem(hr *http.Request, r *ImageReq, rs result) (map[string]any, error) {
 	item := map[string]any{}
 	if r.ResponseFormat == "url" {
 		b := make([]byte, 16)
 		rand.Read(b)
 		name := hex.EncodeToString(b) + "." + extOf(rs.format)
-		if err := os.WriteFile(filepath.Join(a.cfg.DataDir, "images", name), rs.data, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(s.cfg.DataDir, "images", name), rs.data, 0o644); err != nil {
 			return nil, err
 		}
-		item["url"] = a.baseURL(hr) + "/images/" + name
+		item["url"] = s.baseURL(hr) + "/images/" + name
 	} else {
 		item["b64_json"] = base64.StdEncoding.EncodeToString(rs.data)
 	}
@@ -330,7 +310,7 @@ func (a *App) imageItem(hr *http.Request, r *ImageReq, rs result) (map[string]an
 	return item, nil
 }
 
-func (a *App) respond(w http.ResponseWriter, hr *http.Request, r *ImageReq, results []result, inputImages int) {
+func (s *Server) respond(w http.ResponseWriter, hr *http.Request, r *ImageReq, results []result, inputImages int) {
 	var items []map[string]any
 	var firstErr error
 	format := r.OutputFormat
@@ -341,7 +321,7 @@ func (a *App) respond(w http.ResponseWriter, hr *http.Request, r *ImageReq, resu
 			}
 			continue
 		}
-		item, err := a.imageItem(hr, r, rs)
+		item, err := s.imageItem(hr, r, rs)
 		if err != nil {
 			firstErr = err
 			continue
@@ -365,8 +345,7 @@ func (a *App) respond(w http.ResponseWriter, hr *http.Request, r *ImageReq, resu
 	})
 }
 
-// stream 以 SSE 输出（OpenAI 流式生图事件格式），每张图完成即推送
-func (a *App) stream(w http.ResponseWriter, r *ImageReq, prefix string, inputImages int, run func(onDone func(int, result))) {
+func (s *Server) stream(w http.ResponseWriter, r *ImageReq, prefix string, inputImages int, run func(onDone func(int, result))) {
 	fl, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -383,7 +362,7 @@ func (a *App) stream(w http.ResponseWriter, r *ImageReq, prefix string, inputIma
 		mu.Unlock()
 	}
 	done := make(chan struct{})
-	go func() { // 保活，防止反向代理空闲断开
+	go func() {
 		t := time.NewTicker(15 * time.Second)
 		defer t.Stop()
 		for {
@@ -421,10 +400,8 @@ func (a *App) stream(w http.ResponseWriter, r *ImageReq, prefix string, inputIma
 	close(done)
 }
 
-// ---------- POST /v1/images/generations ----------
-
-func (a *App) handleGenerations(w http.ResponseWriter, hr *http.Request) {
-	keyID, ok := a.keys.Auth(hr)
+func (s *Server) handleGenerations(w http.ResponseWriter, hr *http.Request) {
+	keyID, ok := s.keys.Auth(hr)
 	if !ok {
 		writeErr(w, 401, "invalid_request_error", "invalid_api_key", "Incorrect API key provided.")
 		return
@@ -434,25 +411,23 @@ func (a *App) handleGenerations(w http.ResponseWriter, hr *http.Request) {
 		writeErr(w, 400, "invalid_request_error", "invalid_json", "Invalid JSON body: "+err.Error())
 		return
 	}
-	if err := a.normalize(&r); err != nil {
+	if err := s.normalize(&r); err != nil {
 		writeErr(w, 400, "invalid_request_error", "invalid_value", err.Error())
 		return
 	}
-	upModel := a.upstreamModel(r.Model, false)
-	body := GenParams{Model: upModel, Prompt: r.Prompt, Negative: r.NegativePrompt, Width: r.width, Height: r.height,
-		Steps: r.Steps, Guidance: r.GuidanceScale, Seed: r.Seed}.body()
+	upModel := s.upstreamModel(r.Model, false)
+	body := upstream.GenParams{Model: upModel, Prompt: r.Prompt, Negative: r.NegativePrompt, Width: r.width, Height: r.height,
+		Steps: r.Steps, Guidance: r.GuidanceScale, Seed: r.Seed}.Body()
 	call := func(ctx context.Context, token string) ([]byte, error) {
-		return a.up.Post(ctx, token, "/images/generations", "application/json", body)
+		return s.up.Post(ctx, token, "/images/generations", "application/json", body)
 	}
 	meta := logMeta{keyID: keyID, endpoint: "generations", model: r.Model, upstream: upModel, size: fmt.Sprintf("%dx%d", r.width, r.height)}
 	if r.Stream {
-		a.stream(w, &r, "image_generation", 0, func(onDone func(int, result)) { a.runJobs(hr.Context(), &r, meta, call, onDone) })
+		s.stream(w, &r, "image_generation", 0, func(onDone func(int, result)) { s.runJobs(hr.Context(), &r, meta, call, onDone) })
 		return
 	}
-	a.respond(w, hr, &r, a.runJobs(hr.Context(), &r, meta, call, nil), 0)
+	s.respond(w, hr, &r, s.runJobs(hr.Context(), &r, meta, call, nil), 0)
 }
-
-// ---------- POST /v1/images/edits ----------
 
 type filePart struct {
 	name  string
@@ -460,8 +435,8 @@ type filePart struct {
 	data  []byte
 }
 
-func (a *App) handleEdits(w http.ResponseWriter, hr *http.Request) {
-	keyID, ok := a.keys.Auth(hr)
+func (s *Server) handleEdits(w http.ResponseWriter, hr *http.Request) {
+	keyID, ok := s.keys.Auth(hr)
 	if !ok {
 		writeErr(w, 401, "invalid_request_error", "invalid_api_key", "Incorrect API key provided.")
 		return
@@ -473,7 +448,7 @@ func (a *App) handleEdits(w http.ResponseWriter, hr *http.Request) {
 	if strings.HasPrefix(hr.Header.Get("Content-Type"), "multipart/") {
 		images, mask, err = parseMultipartEdit(hr, &r)
 	} else {
-		images, mask, err = a.parseJSONEdit(hr, &r)
+		images, mask, err = s.parseJSONEdit(hr, &r)
 	}
 	if err != nil {
 		writeErr(w, 400, "invalid_request_error", "invalid_value", err.Error())
@@ -488,11 +463,11 @@ func (a *App) handleEdits(w http.ResponseWriter, hr *http.Request) {
 		return
 	}
 	sizeGiven := r.Size != "" && r.Size != "auto"
-	if err := a.normalize(&r); err != nil {
+	if err := s.normalize(&r); err != nil {
 		writeErr(w, 400, "invalid_request_error", "invalid_value", err.Error())
 		return
 	}
-	upModel := a.upstreamModel(r.Model, true)
+	upModel := s.upstreamModel(r.Model, true)
 	fields := map[string]string{"model": upModel, "prompt": r.Prompt, "response_format": "b64_json"}
 	if sizeGiven {
 		fields["size"] = fmt.Sprintf("%dx%d", r.width, r.height)
@@ -512,14 +487,14 @@ func (a *App) handleEdits(w http.ResponseWriter, hr *http.Request) {
 	}
 	body, ctype := buildMultipart(fields, images, mask)
 	call := func(ctx context.Context, token string) ([]byte, error) {
-		return a.up.Post(ctx, token, "/images/edits", ctype, body)
+		return s.up.Post(ctx, token, "/images/edits", ctype, body)
 	}
 	meta := logMeta{keyID: keyID, endpoint: "edits", model: r.Model, upstream: upModel, size: fmt.Sprintf("%dx%d", r.width, r.height)}
 	if r.Stream {
-		a.stream(w, &r, "image_edit", len(images), func(onDone func(int, result)) { a.runJobs(hr.Context(), &r, meta, call, onDone) })
+		s.stream(w, &r, "image_edit", len(images), func(onDone func(int, result)) { s.runJobs(hr.Context(), &r, meta, call, onDone) })
 		return
 	}
-	a.respond(w, hr, &r, a.runJobs(hr.Context(), &r, meta, call, nil), len(images))
+	s.respond(w, hr, &r, s.runJobs(hr.Context(), &r, meta, call, nil), len(images))
 }
 
 func parseMultipartEdit(hr *http.Request, r *ImageReq) ([]filePart, *filePart, error) {
@@ -578,14 +553,13 @@ func parseMultipartEdit(hr *http.Request, r *ImageReq) ([]filePart, *filePart, e
 	return images, mask, nil
 }
 
-// parseJSONEdit 支持 {"images":[{"image_url":"data:...|https://..."}], "mask":{"image_url":...}}
-func (a *App) parseJSONEdit(hr *http.Request, r *ImageReq) ([]filePart, *filePart, error) {
+func (s *Server) parseJSONEdit(hr *http.Request, r *ImageReq) ([]filePart, *filePart, error) {
 	if err := json.NewDecoder(io.LimitReader(hr.Body, 80<<20)).Decode(r); err != nil {
 		return nil, nil, fmt.Errorf("invalid JSON body: %v", err)
 	}
 	var images []filePart
 	for i, raw := range r.Images {
-		p, err := a.loadImageRef(hr.Context(), raw, fmt.Sprintf("image_%d", i))
+		p, err := s.loadImageRef(hr.Context(), raw, fmt.Sprintf("image_%d", i))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -593,7 +567,7 @@ func (a *App) parseJSONEdit(hr *http.Request, r *ImageReq) ([]filePart, *filePar
 	}
 	var mask *filePart
 	if len(r.Mask) > 0 && string(r.Mask) != "null" {
-		p, err := a.loadImageRef(hr.Context(), r.Mask, "mask")
+		p, err := s.loadImageRef(hr.Context(), r.Mask, "mask")
 		if err != nil {
 			return nil, nil, err
 		}
@@ -602,7 +576,7 @@ func (a *App) parseJSONEdit(hr *http.Request, r *ImageReq) ([]filePart, *filePar
 	return images, mask, nil
 }
 
-func (a *App) loadImageRef(ctx context.Context, raw json.RawMessage, name string) (filePart, error) {
+func (s *Server) loadImageRef(ctx context.Context, raw json.RawMessage, name string) (filePart, error) {
 	var ref string
 	if json.Unmarshal(raw, &ref) != nil {
 		var obj struct {
@@ -623,7 +597,7 @@ func (a *App) loadImageRef(ctx context.Context, raw json.RawMessage, name string
 		_, enc, _ := strings.Cut(ref, ",")
 		b, err = base64.StdEncoding.DecodeString(enc)
 	case strings.HasPrefix(ref, "http://"), strings.HasPrefix(ref, "https://"):
-		b, err = a.up.download(ctx, ref)
+		b, err = s.up.Download(ctx, ref)
 	case ref != "":
 		b, err = base64.StdEncoding.DecodeString(ref)
 	default:
@@ -659,17 +633,15 @@ func buildMultipart(fields map[string]string, images []filePart, mask *filePart)
 	return buf.Bytes(), mw.FormDataContentType()
 }
 
-// ---------- GET /v1/models ----------
-
-func (a *App) handleModels(w http.ResponseWriter, hr *http.Request) {
-	if _, ok := a.keys.Auth(hr); !ok {
+func (s *Server) handleModels(w http.ResponseWriter, hr *http.Request) {
+	if _, ok := s.keys.Auth(hr); !ok {
 		writeErr(w, 401, "invalid_request_error", "invalid_api_key", "Incorrect API key provided.")
 		return
 	}
 	var data []map[string]any
-	for id := range a.cfg.ModelMap {
+	for id := range s.cfg.ModelMap {
 		data = append(data, map[string]any{"id": id, "object": "model", "created": 1700000000, "owned_by": "openai"})
 	}
-	data = append(data, map[string]any{"id": a.cfg.DefaultModel, "object": "model", "created": 1700000000, "owned_by": "gitee-ai"})
+	data = append(data, map[string]any{"id": s.cfg.DefaultModel, "object": "model", "created": 1700000000, "owned_by": "gitee-ai"})
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }

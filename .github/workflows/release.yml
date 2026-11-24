@@ -46,7 +46,7 @@ jobs:
             EXT=""
             [ "$GOOS" = "windows" ] && EXT=".exe"
             OUT="dist/giteeai2api_${VERSION}_${GOOS}_${GOARCH}${EXT}"
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="$LDFLAGS" -o "$OUT" .
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags="$LDFLAGS" -o "$OUT" ./cmd/giteeai2api
           done
           cd dist && sha256sum * > checksums.txt
       - uses: softprops/action-gh-release@v2

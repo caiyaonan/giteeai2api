@@ -81,7 +81,7 @@ docker compose up -d --build
 ```bash
 cp .env.example .env
 # 务必修改 .env 中的 ADMIN_PASSWORD
-go build -trimpath -ldflags="-s -w" -o giteeai2api .
+go build -trimpath -ldflags="-s -w" -o giteeai2api ./cmd/giteeai2api
 ./giteeai2api
 ```
 

@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -10,7 +10,6 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-// detectFormat 返回 png / jpeg / webp
 func detectFormat(b []byte) string {
 	switch http.DetectContentType(b) {
 	case "image/jpeg":
@@ -26,8 +25,6 @@ func detectFormat(b []byte) string {
 	return "png"
 }
 
-// convertImage 按 output_format 转码；格式相同则零拷贝直接返回。
-// webp 编码标准库不支持，此时保留原图并返回实际格式。
 func convertImage(b []byte, want string, compression *int) ([]byte, string) {
 	src := detectFormat(b)
 	if want == "jpg" {
@@ -57,16 +54,6 @@ func convertImage(b []byte, want string, compression *int) ([]byte, string) {
 		return b, src
 	}
 	return buf.Bytes(), want
-}
-
-func mimeOf(format string) string {
-	switch format {
-	case "jpeg":
-		return "image/jpeg"
-	case "webp":
-		return "image/webp"
-	}
-	return "image/png"
 }
 
 func extOf(format string) string {

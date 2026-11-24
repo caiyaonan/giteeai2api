@@ -1,4 +1,4 @@
-package main
+package upstream
 
 import (
 	"bytes"
@@ -12,14 +12,17 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"giteeai2api/internal/config"
+	"giteeai2api/internal/pool"
 )
 
-type Upstream struct {
-	cfg *Config
+type Client struct {
+	cfg *config.Config
 	hc  *http.Client
 }
 
-func newUpstream(cfg *Config) *Upstream {
+func New(cfg *config.Config) *Client {
 	tr := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
 		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -29,20 +32,18 @@ func newUpstream(cfg *Config) *Upstream {
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
-	return &Upstream{cfg: cfg, hc: &http.Client{Transport: tr, Timeout: cfg.UpstreamTimeout}}
+	return &Client{cfg: cfg, hc: &http.Client{Transport: tr, Timeout: cfg.UpstreamTimeout}}
 }
 
-// UpErr 上游错误，Out 决定令牌如何处置以及是否换令牌重试
-type UpErr struct {
+// Error 上游错误，Out 决定令牌如何处置以及是否换令牌重试
+type Error struct {
 	Status int
 	Msg    string
-	Out    Outcome
+	Out    pool.Outcome
 }
 
-func (e *UpErr) Error() string { return fmt.Sprintf("upstream %d: %s", e.Status, e.Msg) }
-
-// Retryable 换一个令牌可能成功
-func (e *UpErr) Retryable() bool { return e.Out != OutClient }
+func (e *Error) Error() string   { return fmt.Sprintf("upstream %d: %s", e.Status, e.Msg) }
+func (e *Error) Retryable() bool { return e.Out != pool.OutClient }
 
 type GenParams struct {
 	Model    string
@@ -55,7 +56,7 @@ type GenParams struct {
 	Seed     *int64
 }
 
-func (g GenParams) body() []byte {
+func (g GenParams) Body() []byte {
 	m := map[string]any{
 		"model":           g.Model,
 		"prompt":          g.Prompt,
@@ -79,8 +80,7 @@ func (g GenParams) body() []byte {
 	return b
 }
 
-// Post 调用上游生图类接口并返回图片字节
-func (u *Upstream) Post(ctx context.Context, token, path, ctype string, body []byte) ([]byte, error) {
+func (u *Client) Post(ctx context.Context, token, path, ctype string, body []byte) ([]byte, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u.cfg.UpstreamBase+path, bytes.NewReader(body))
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -104,23 +104,23 @@ func (u *Upstream) Post(ctx context.Context, token, path, ctype string, body []b
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &data); err != nil || len(data.Data) == 0 {
-		return nil, &UpErr{Status: 502, Msg: "upstream returned no image: " + truncate(string(raw), 200), Out: OutTransient}
+		return nil, &Error{Status: 502, Msg: "upstream returned no image: " + truncate(string(raw), 200), Out: pool.OutTransient}
 	}
 	d := data.Data[0]
 	if d.B64 != "" {
 		img, err := base64.StdEncoding.DecodeString(d.B64)
 		if err != nil {
-			return nil, &UpErr{Status: 502, Msg: "invalid base64 from upstream", Out: OutTransient}
+			return nil, &Error{Status: 502, Msg: "invalid base64 from upstream", Out: pool.OutTransient}
 		}
 		return img, nil
 	}
 	if d.URL != "" {
-		return u.download(ctx, d.URL)
+		return u.Download(ctx, d.URL)
 	}
-	return nil, &UpErr{Status: 502, Msg: "upstream returned neither b64_json nor url", Out: OutTransient}
+	return nil, &Error{Status: 502, Msg: "upstream returned neither b64_json nor url", Out: pool.OutTransient}
 }
 
-func (u *Upstream) download(ctx context.Context, url string) ([]byte, error) {
+func (u *Client) Download(ctx context.Context, url string) ([]byte, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	resp, err := u.hc.Do(req)
 	if err != nil {
@@ -128,7 +128,7 @@ func (u *Upstream) download(ctx context.Context, url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, &UpErr{Status: 502, Msg: fmt.Sprintf("download image failed: %d", resp.StatusCode), Out: OutTransient}
+		return nil, &Error{Status: 502, Msg: fmt.Sprintf("download image failed: %d", resp.StatusCode), Out: pool.OutTransient}
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
@@ -137,8 +137,7 @@ func (u *Upstream) download(ctx context.Context, url string) ([]byte, error) {
 	return b, nil
 }
 
-// Check 用 /models 接口校验令牌是否有效（不消耗生图额度）
-func (u *Upstream) Check(ctx context.Context, token string) error {
+func (u *Client) Check(ctx context.Context, token string) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u.cfg.UpstreamBase+"/models", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := u.hc.Do(req)
@@ -153,16 +152,16 @@ func (u *Upstream) Check(ctx context.Context, token string) error {
 	return classify(resp.StatusCode, raw)
 }
 
-func netErr(ctx context.Context, err error) *UpErr {
+func netErr(ctx context.Context, err error) *Error {
 	if ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled) {
-		return &UpErr{Status: 499, Msg: "client canceled", Out: OutClient}
+		return &Error{Status: 499, Msg: "client canceled", Out: pool.OutClient}
 	}
-	return &UpErr{Status: 502, Msg: err.Error(), Out: OutTransient}
+	return &Error{Status: 502, Msg: err.Error(), Out: pool.OutTransient}
 }
 
 var quotaKeywords = []string{"quota", "额度", "余额", "insufficient", "balance", "次数", "daily", "每日", "今日", "用尽", "exhausted", "arrears", "欠费"}
 
-func classify(status int, raw []byte) *UpErr {
+func classify(status int, raw []byte) *Error {
 	msg := extractMsg(raw)
 	lower := strings.ToLower(msg)
 	isQuota := false
@@ -172,18 +171,18 @@ func classify(status int, raw []byte) *UpErr {
 			break
 		}
 	}
-	e := &UpErr{Status: status, Msg: msg}
+	e := &Error{Status: status, Msg: msg}
 	switch {
 	case status == 401:
-		e.Out = OutInvalid
+		e.Out = pool.OutInvalid
 	case status == 402 || (isQuota && (status == 403 || status == 429)):
-		e.Out = OutQuota
+		e.Out = pool.OutQuota
 	case status == 429:
-		e.Out = OutRate
+		e.Out = pool.OutRate
 	case status == 403 || status >= 500:
-		e.Out = OutTransient
-	default: // 400/404/413/422 等：请求本身问题，换令牌无意义
-		e.Out = OutClient
+		e.Out = pool.OutTransient
+	default:
+		e.Out = pool.OutClient
 	}
 	return e
 }
@@ -209,4 +208,11 @@ func extractMsg(raw []byte) string {
 		}
 	}
 	return truncate(strings.TrimSpace(string(raw)), 300)
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }

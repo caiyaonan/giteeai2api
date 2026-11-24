@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -13,34 +13,36 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"giteeai2api/internal/config"
+	"giteeai2api/internal/pool"
+	"giteeai2api/internal/upstream"
 )
 
 const sessionCookie = "g2a_session"
 
-// ---------- 会话（无状态 HMAC 签名 Cookie） ----------
-
-func (a *App) sign(exp string) string {
-	m := hmac.New(sha256.New, a.secret)
+func (s *Server) sign(exp string) string {
+	m := hmac.New(sha256.New, s.secret)
 	m.Write([]byte(exp))
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-func (a *App) adminOK(r *http.Request) bool {
+func (s *Server) adminOK(r *http.Request) bool {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return false
 	}
 	exp, sig, ok := strings.Cut(c.Value, ".")
-	if !ok || !hmac.Equal([]byte(sig), []byte(a.sign(exp))) {
+	if !ok || !hmac.Equal([]byte(sig), []byte(s.sign(exp))) {
 		return false
 	}
 	ts, _ := strconv.ParseInt(exp, 10, 64)
 	return time.Now().Unix() < ts
 }
 
-func (a *App) admin(h http.HandlerFunc) http.HandlerFunc {
+func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !a.adminOK(r) {
+		if !s.adminOK(r) {
 			writeErr(w, 401, "authentication_error", "unauthorized", "请先登录")
 			return
 		}
@@ -48,23 +50,23 @@ func (a *App) admin(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Password string `json:"password"`
 	}
 	json.NewDecoder(r.Body).Decode(&in)
-	if subtle.ConstantTimeCompare([]byte(in.Password), []byte(a.cfg.AdminPassword)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(in.Password), []byte(s.cfg.AdminPassword)) != 1 {
 		time.Sleep(500 * time.Millisecond)
 		writeErr(w, 401, "authentication_error", "wrong_password", "密码错误")
 		return
 	}
 	exp := strconv.FormatInt(time.Now().Add(7*24*time.Hour).Unix(), 10)
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: exp + "." + a.sign(exp), Path: "/",
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: exp + "." + s.sign(exp), Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 7 * 24 * 3600})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
@@ -74,15 +76,13 @@ func pathID(r *http.Request) int64 {
 	return id
 }
 
-// ---------- 令牌池 ----------
-
-func (a *App) handleTokenList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"data": a.pool.List(), "summary": a.pool.Summary()})
+func (s *Server) handleTokenList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"data": s.pool.List(), "summary": s.pool.Summary()})
 }
 
-func (a *App) handleTokenAdd(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleTokenAdd(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Tokens     string `json:"tokens"` // 多个令牌，换行/逗号分隔
+		Tokens     string `json:"tokens"`
 		Name       string `json:"name"`
 		DailyLimit int    `json:"daily_limit"`
 	}
@@ -90,7 +90,7 @@ func (a *App) handleTokenAdd(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_request_error", "", err.Error())
 		return
 	}
-	n, err := a.pool.Add(strings.Fields(strings.NewReplacer(",", " ", ";", " ").Replace(in.Tokens)), in.Name, in.DailyLimit)
+	n, err := s.pool.Add(strings.Fields(strings.NewReplacer(",", " ", ";", " ").Replace(in.Tokens)), in.Name, in.DailyLimit)
 	if err != nil {
 		writeErr(w, 500, "server_error", "", err.Error())
 		return
@@ -98,88 +98,87 @@ func (a *App) handleTokenAdd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"added": n})
 }
 
-func (a *App) handleTokenPatch(w http.ResponseWriter, r *http.Request) {
-	var p TokenPatch
+func (s *Server) handleTokenPatch(w http.ResponseWriter, r *http.Request) {
+	var p pool.Patch
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeErr(w, 400, "invalid_request_error", "", err.Error())
 		return
 	}
-	if !a.pool.Update(pathID(r), p) {
+	if !s.pool.Update(pathID(r), p) {
 		writeErr(w, 404, "invalid_request_error", "", "token not found")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-func (a *App) handleTokenBatch(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleTokenBatch(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		IDs    []int64 `json:"ids"`
-		Action string  `json:"action"` // enable | disable | delete | reset
+		Action string  `json:"action"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, 400, "invalid_request_error", "", err.Error())
 		return
 	}
 	if in.Action == "delete" {
-		writeJSON(w, 200, map[string]any{"affected": a.pool.Delete(in.IDs)})
+		writeJSON(w, 200, map[string]any{"affected": s.pool.Delete(in.IDs)})
 		return
 	}
-	t, f, active := true, false, StatusActive
+	t, f, active := true, false, pool.StatusActive
 	n := 0
 	for _, id := range in.IDs {
-		var p TokenPatch
+		var p pool.Patch
 		switch in.Action {
 		case "enable":
 			p.Enabled = &t
 		case "disable":
 			p.Enabled = &f
-		case "reset": // 重置为可用并清零今日用量
+		case "reset":
 			p.Status, p.ResetUsage = &active, true
 		default:
 			writeErr(w, 400, "invalid_request_error", "", "unknown action")
 			return
 		}
-		if a.pool.Update(id, p) {
+		if s.pool.Update(id, p) {
 			n++
 		}
 	}
 	writeJSON(w, 200, map[string]any{"affected": n})
 }
 
-// checkToken 校验令牌有效性：有效则恢复 invalid 状态，401 则标记 invalid
-func (a *App) checkToken(ctx context.Context, t *Token) (bool, string) {
-	err := a.up.Check(ctx, t.Value)
-	active, invalid := StatusActive, StatusInvalid
+func (s *Server) checkToken(ctx context.Context, t *pool.Token) (bool, string) {
+	err := s.up.Check(ctx, t.Value)
+	active, invalid := pool.StatusActive, pool.StatusInvalid
 	if err == nil {
-		if t.Status == StatusInvalid {
-			a.pool.Update(t.ID, TokenPatch{Status: &active})
+		if t.Status == pool.StatusInvalid {
+			s.pool.Update(t.ID, pool.Patch{Status: &active})
 		}
 		return true, "令牌有效"
 	}
-	var ue *UpErr
-	if errors.As(err, &ue) && ue.Out == OutInvalid {
-		a.pool.Update(t.ID, TokenPatch{Status: &invalid})
+	var ue *upstream.Error
+	if errors.As(err, &ue) && ue.Out == pool.OutInvalid {
+		s.pool.Update(t.ID, pool.Patch{Status: &invalid})
 	}
 	return false, err.Error()
 }
 
-func (a *App) handleTokenCheck(w http.ResponseWriter, r *http.Request) {
-	t := a.pool.Get(pathID(r))
+func (s *Server) handleTokenCheck(w http.ResponseWriter, r *http.Request) {
+	t := s.pool.Get(pathID(r))
 	if t == nil {
 		writeErr(w, 404, "invalid_request_error", "", "token not found")
 		return
 	}
-	ok, msg := a.checkToken(r.Context(), t)
+	ok, msg := s.checkToken(r.Context(), t)
 	writeJSON(w, 200, map[string]any{"ok": ok, "message": msg})
 }
 
-func (a *App) handleTokenCheckAll(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleTokenCheckAll(w http.ResponseWriter, r *http.Request) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
 	okN, badN := 0, 0
-	for _, v := range a.pool.List() {
-		t := a.pool.Get(v.ID)
+	for _, v := range s.pool.List() {
+		t := s.pool.Get(v.ID)
 		if t == nil {
 			continue
 		}
@@ -187,7 +186,7 @@ func (a *App) handleTokenCheckAll(w http.ResponseWriter, r *http.Request) {
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem; wg.Done() }()
-			ok, _ := a.checkToken(r.Context(), t)
+			ok, _ := s.checkToken(r.Context(), t)
 			mu.Lock()
 			if ok {
 				okN++
@@ -201,18 +200,16 @@ func (a *App) handleTokenCheckAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": okN, "failed": badN})
 }
 
-// ---------- 客户端密钥 ----------
-
-func (a *App) handleKeyList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"data": a.keys.List(), "static_count": len(a.cfg.APIKeys)})
+func (s *Server) handleKeyList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"data": s.keys.List(), "static_count": len(s.cfg.APIKeys)})
 }
 
-func (a *App) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name string `json:"name"`
 	}
 	json.NewDecoder(r.Body).Decode(&in)
-	k, err := a.keys.Create(in.Name)
+	k, err := s.keys.Create(in.Name)
 	if err != nil {
 		writeErr(w, 500, "server_error", "", err.Error())
 		return
@@ -220,24 +217,22 @@ func (a *App) handleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, k)
 }
 
-func (a *App) handleKeyPatch(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleKeyPatch(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name    *string `json:"name"`
 		Enabled *bool   `json:"enabled"`
 	}
 	json.NewDecoder(r.Body).Decode(&in)
-	writeJSON(w, 200, map[string]any{"ok": a.keys.Update(pathID(r), in.Name, in.Enabled)})
+	writeJSON(w, 200, map[string]any{"ok": s.keys.Update(pathID(r), in.Name, in.Enabled)})
 }
 
-func (a *App) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"ok": a.keys.Delete(pathID(r))})
+func (s *Server) handleKeyDelete(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{"ok": s.keys.Delete(pathID(r))})
 }
-
-// ---------- 统计 ----------
 
 func startOfToday() int64 {
-	n := time.Now().In(cst)
-	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, cst).Unix()
+	n := time.Now().In(config.CST)
+	return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, config.CST).Unix()
 }
 
 type bucket struct {
@@ -247,13 +242,13 @@ type bucket struct {
 	Fail    int   `json:"fail"`
 }
 
-func (a *App) series(since, step int64) []bucket {
+func (s *Server) series(since, step int64) []bucket {
 	n := int((time.Now().Unix()-since)/step) + 1
 	out := make([]bucket, n)
 	for i := range out {
 		out[i].T = since + int64(i)*step
 	}
-	rows, err := a.store.r.Query(`SELECT (ts-?)/? AS b, COUNT(*), SUM(status=200) FROM logs WHERE ts>=? GROUP BY b`, since, step, since)
+	rows, err := s.store.R.Query(`SELECT (ts-?)/? AS b, COUNT(*), SUM(status=200) FROM logs WHERE ts>=? GROUP BY b`, since, step, since)
 	if err != nil {
 		return out
 	}
@@ -268,13 +263,13 @@ func (a *App) series(since, step int64) []bucket {
 	return out
 }
 
-func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	today := startOfToday()
 	var total, succ, allTotal, allSucc int
 	var avgLat float64
-	a.store.r.QueryRow(`SELECT COUNT(*), COALESCE(SUM(status=200),0), COALESCE(AVG(CASE WHEN status=200 THEN latency_ms END),0)
+	s.store.R.QueryRow(`SELECT COUNT(*), COALESCE(SUM(status=200),0), COALESCE(AVG(CASE WHEN status=200 THEN latency_ms END),0)
 		FROM logs WHERE ts>=?`, today).Scan(&total, &succ, &avgLat)
-	a.store.r.QueryRow(`SELECT COUNT(*), COALESCE(SUM(status=200),0) FROM logs`).Scan(&allTotal, &allSucc)
+	s.store.R.QueryRow(`SELECT COUNT(*), COALESCE(SUM(status=200),0) FROM logs`).Scan(&allTotal, &allSucc)
 
 	type kv struct {
 		Name    string `json:"name"`
@@ -283,7 +278,7 @@ func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	group := func(q string) []kv {
 		var out []kv
-		rows, err := a.store.r.Query(q, today)
+		rows, err := s.store.R.Query(q, today)
 		if err != nil {
 			return out
 		}
@@ -297,7 +292,7 @@ func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	models := group(`SELECT model, COUNT(*), SUM(status=200) FROM logs WHERE ts>=? GROUP BY model ORDER BY 2 DESC LIMIT 10`)
 	keyRows := group(`SELECT CAST(key_id AS TEXT), COUNT(*), SUM(status=200) FROM logs WHERE ts>=? GROUP BY key_id ORDER BY 2 DESC LIMIT 10`)
-	names := a.keys.Names()
+	names := s.keys.Names()
 	for i := range keyRows {
 		id, _ := strconv.ParseInt(keyRows[i].Name, 10, 64)
 		if n, ok := names[id]; ok && n != "" {
@@ -310,20 +305,20 @@ func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 	writeJSON(w, 200, map[string]any{
-		"pool": a.pool.Summary(),
+		"pool": s.pool.Summary(),
 		"today": map[string]any{
 			"total": total, "success": succ, "fail": total - succ, "avg_latency_ms": int(avgLat),
 		},
 		"all":    map[string]any{"total": allTotal, "success": allSucc},
-		"hourly": a.series(now-now%3600-23*3600, 3600),
-		"daily":  a.series(today-13*86400, 86400),
+		"hourly": s.series(now-now%3600-23*3600, 3600),
+		"daily":  s.series(today-13*86400, 86400),
 		"models": models,
 		"keys":   keyRows,
 		"errors": errs,
 	})
 }
 
-func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 || limit > 500 {
@@ -346,17 +341,17 @@ func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 	}
 	var total int
-	a.store.r.QueryRow(`SELECT COUNT(*) FROM logs WHERE `+where, args...).Scan(&total)
-	rows, err := a.store.r.Query(`SELECT id,ts,key_id,token_id,endpoint,model,upstream_model,size,status,latency_ms,attempts,error
+	s.store.R.QueryRow(`SELECT COUNT(*) FROM logs WHERE `+where, args...).Scan(&total)
+	rows, err := s.store.R.Query(`SELECT id,ts,key_id,token_id,endpoint,model,upstream_model,size,status,latency_ms,attempts,error
 		FROM logs WHERE `+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
 	if err != nil {
 		writeErr(w, 500, "server_error", "", err.Error())
 		return
 	}
 	defer rows.Close()
-	keyNames := a.keys.Names()
+	keyNames := s.keys.Names()
 	tokNames := map[int64]string{}
-	for _, t := range a.pool.List() {
+	for _, t := range s.pool.List() {
 		tokNames[t.ID] = t.Masked
 		if t.Name != "" {
 			tokNames[t.ID] = t.Name + " (" + t.Masked + ")"
@@ -375,10 +370,10 @@ func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"data": out, "total": total})
 }
 
-func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
-	c := a.cfg
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	c := s.cfg
 	writeJSON(w, 200, map[string]any{
-		"version": Version, "commit": Commit, "build_time": BuildTime,
+		"version": s.build.Version, "commit": s.build.Commit, "build_time": s.build.BuildTime,
 		"upstream_base": c.UpstreamBase, "default_model": c.DefaultModel, "edit_model": c.EditModel,
 		"model_map": c.ModelMap, "daily_limit": c.DailyLimit, "token_concurrency": c.TokenConcurrency,
 		"max_retries": c.MaxRetries, "queue_timeout_sec": int(c.QueueTimeout.Seconds()),

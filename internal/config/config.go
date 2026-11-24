@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"bufio"
@@ -8,32 +8,32 @@ import (
 	"time"
 )
 
-// Config 全部来自环境变量，见 .env.example
+// CST 北京时间，用于每日额度重置与统计口径
+var CST = time.FixedZone("CST", 8*3600)
+
+// Config 全部来自环境变量或本地 .env 文件，见 .env.example
 type Config struct {
 	Addr             string
 	DataDir          string
 	AdminPassword    string
-	APIKeys          []string // 静态客户端密钥（可选，后台也可管理）
+	APIKeys          []string
 	UpstreamBase     string
-	DefaultModel     string // 生图上游模型
-	EditModel        string // 改图上游模型
+	DefaultModel     string
+	EditModel        string
 	ModelMap         map[string]string
-	DailyLimit       int // 每个令牌每日额度，0 = 不限
-	TokenConcurrency int // 单令牌并发上限
-	MaxRetries       int // 单张图失败后换令牌重试次数
+	DailyLimit       int
+	TokenConcurrency int
+	MaxRetries       int
 	QueueTimeout     time.Duration
 	UpstreamTimeout  time.Duration
 	MaxSide          int
 	DefaultSize      string
-	QualitySteps     map[string]int // quality → num_inference_steps
+	QualitySteps     map[string]int
 	DefaultNegative  string
 	PublicBaseURL    string
 	ImageTTL         time.Duration
 	LogRetentionDays int
 }
-
-// 北京时间，用于每日额度重置与统计
-var cst = time.FixedZone("CST", 8*3600)
 
 func loadDotEnv(path string) {
 	f, err := os.Open(path)
@@ -59,7 +59,7 @@ func loadDotEnv(path string) {
 	}
 }
 
-func loadConfig() *Config {
+func Load() *Config {
 	loadDotEnv(".env")
 	def := env("DEFAULT_MODEL", "z-image-turbo")
 	c := &Config{
@@ -82,7 +82,6 @@ func loadConfig() *Config {
 		ImageTTL:         time.Duration(envInt("IMAGE_TTL_HOURS", 24)) * time.Hour,
 		LogRetentionDays: envInt("LOG_RETENTION_DAYS", 30),
 	}
-	// OpenAI 模型名 → Gitee AI 模型名；未命中的模型名原样透传给上游
 	c.ModelMap = map[string]string{
 		"gpt-image-2":      def,
 		"gpt-image-1.5":    def,
@@ -96,7 +95,6 @@ func loadConfig() *Config {
 			c.ModelMap[strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
 	}
-	// 质量档位 → 推理步数（z-image-turbo 推荐 9 步）
 	c.QualitySteps = map[string]int{"low": 6, "medium": 9, "high": 12}
 	for _, kv := range splitList(env("QUALITY_STEPS", "")) {
 		if k, v, ok := strings.Cut(kv, "="); ok {

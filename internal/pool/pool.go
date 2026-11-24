@@ -1,4 +1,4 @@
-package main
+package pool
 
 import (
 	"context"
@@ -7,6 +7,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"giteeai2api/internal/config"
+	"giteeai2api/internal/store"
 )
 
 const (
@@ -48,14 +51,13 @@ type Token struct {
 	CreatedAt    int64  `json:"created_at"`
 	Inflight     int    `json:"inflight"`
 	Cooldown     int64  `json:"cooldown_until"`
-	// 仅用于展示
-	Limit     int `json:"limit"`
-	Remaining int `json:"remaining"`
+	Limit        int    `json:"limit"`
+	Remaining    int    `json:"remaining"`
 }
 
 type Pool struct {
-	cfg    *Config
-	store  *Store
+	cfg    *config.Config
+	store  *store.Store
 	mu     sync.Mutex
 	tokens []*Token
 	rr     int
@@ -63,9 +65,9 @@ type Pool struct {
 	wake   chan struct{}
 }
 
-func newPool(cfg *Config, s *Store) *Pool {
+func New(cfg *config.Config, s *store.Store) *Pool {
 	p := &Pool{cfg: cfg, store: s, wake: make(chan struct{})}
-	rows, err := s.r.Query(`SELECT id,name,token,enabled,status,daily_limit,used_today,used_date,
+	rows, err := s.R.Query(`SELECT id,name,token,enabled,status,daily_limit,used_today,used_date,
 		success_total,fail_total,last_used_at,last_error,created_at FROM tokens ORDER BY id`)
 	if err != nil {
 		panic(err)
@@ -77,7 +79,7 @@ func newPool(cfg *Config, s *Store) *Pool {
 		var usedDate string
 		rows.Scan(&t.ID, &t.Name, &t.Value, &t.Enabled, &t.Status, &t.DailyLimit, &t.UsedToday, &usedDate,
 			&t.SuccessTotal, &t.FailTotal, &t.LastUsedAt, &t.LastError, &t.CreatedAt)
-		if usedDate != today { // 跨天加载：重置当日计数
+		if usedDate != today {
 			t.UsedToday = 0
 			if t.Status == StatusExhausted {
 				t.Status = StatusActive
@@ -89,7 +91,7 @@ func newPool(cfg *Config, s *Store) *Pool {
 	return p
 }
 
-func todayStr() string { return time.Now().In(cst).Format("2006-01-02") }
+func todayStr() string { return time.Now().In(config.CST).Format("2006-01-02") }
 
 func (p *Pool) limitOf(t *Token) int {
 	if t.DailyLimit > 0 {
@@ -98,7 +100,6 @@ func (p *Pool) limitOf(t *Token) int {
 	return p.cfg.DailyLimit
 }
 
-// 调用方需持锁
 func (p *Pool) resetIfNewDay() {
 	today := todayStr()
 	if today == p.day {
@@ -112,7 +113,7 @@ func (p *Pool) resetIfNewDay() {
 		}
 	}
 	p.store.Async(func(tx *sql.Tx) {
-		execTx(tx, `UPDATE tokens SET used_today=0, used_date=?,
+		store.ExecTx(tx, `UPDATE tokens SET used_today=0, used_date=?,
 			status=CASE WHEN status='exhausted' THEN 'active' ELSE status END`, today)
 	})
 	p.notify()
@@ -123,7 +124,6 @@ func (p *Pool) notify() {
 	p.wake = make(chan struct{})
 }
 
-// pick 选出可用令牌：优先在途最少，同等条件轮询。busy=true 表示有令牌只是暂时占满，值得等待。
 func (p *Pool) pick(exclude map[int64]bool) (best *Token, busy bool) {
 	n := len(p.tokens)
 	now := time.Now().Unix()
@@ -134,7 +134,7 @@ func (p *Pool) pick(exclude map[int64]bool) (best *Token, busy bool) {
 		}
 		limit := p.limitOf(t)
 		if limit > 0 && t.UsedToday+t.Inflight >= limit {
-			if t.Inflight > 0 { // 在途请求可能失败，从而释放额度
+			if t.Inflight > 0 {
 				busy = true
 			}
 			continue
@@ -171,7 +171,7 @@ func (p *Pool) Acquire(ctx context.Context, exclude map[int64]bool) (*Token, err
 		}
 		select {
 		case <-wake:
-		case <-time.After(time.Second): // 冷却到期无事件通知，定时复查
+		case <-time.After(time.Second):
 		case <-timer.C:
 			return nil, ErrBusy
 		case <-ctx.Done():
@@ -210,12 +210,10 @@ func (p *Pool) persist(t *Token) {
 	used, day, status, st, ft, lu, le := t.UsedToday, p.day, t.Status, t.SuccessTotal, t.FailTotal, t.LastUsedAt, t.LastError
 	id := t.ID
 	p.store.Async(func(tx *sql.Tx) {
-		execTx(tx, `UPDATE tokens SET used_today=?,used_date=?,status=?,success_total=?,fail_total=?,
+		store.ExecTx(tx, `UPDATE tokens SET used_today=?,used_date=?,status=?,success_total=?,fail_total=?,
 			last_used_at=?,last_error=? WHERE id=?`, used, day, status, st, ft, lu, le, id)
 	})
 }
-
-// ---------- 管理操作 ----------
 
 func (p *Pool) List() []Token {
 	p.mu.Lock()
@@ -246,7 +244,6 @@ func (p *Pool) Get(id int64) *Token {
 	return nil
 }
 
-// Add 批量导入，自动去重，返回新增数量
 func (p *Pool) Add(values []string, name string, limit int) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -261,7 +258,7 @@ func (p *Pool) Add(values []string, name string, limit int) (int, error) {
 		if v == "" || exist[v] {
 			continue
 		}
-		res, err := p.store.w.Exec(`INSERT INTO tokens(name,token,daily_limit,used_date,created_at) VALUES(?,?,?,?,?)`,
+		res, err := p.store.W.Exec(`INSERT INTO tokens(name,token,daily_limit,used_date,created_at) VALUES(?,?,?,?,?)`,
 			name, v, limit, p.day, now)
 		if err != nil {
 			return added, err
@@ -276,7 +273,7 @@ func (p *Pool) Add(values []string, name string, limit int) (int, error) {
 	return added, nil
 }
 
-type TokenPatch struct {
+type Patch struct {
 	Name       *string `json:"name"`
 	Enabled    *bool   `json:"enabled"`
 	DailyLimit *int    `json:"daily_limit"`
@@ -284,7 +281,7 @@ type TokenPatch struct {
 	ResetUsage bool    `json:"reset_usage"`
 }
 
-func (p *Pool) Update(id int64, f TokenPatch) bool {
+func (p *Pool) Update(id int64, f Patch) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, t := range p.tokens {
@@ -309,7 +306,7 @@ func (p *Pool) Update(id int64, f TokenPatch) bool {
 		}
 		name, en, lim := t.Name, t.Enabled, t.DailyLimit
 		p.store.Async(func(tx *sql.Tx) {
-			execTx(tx, `UPDATE tokens SET name=?,enabled=?,daily_limit=? WHERE id=?`, name, en, lim, id)
+			store.ExecTx(tx, `UPDATE tokens SET name=?,enabled=?,daily_limit=? WHERE id=?`, name, en, lim, id)
 		})
 		p.persist(t)
 		p.notify()
@@ -337,13 +334,13 @@ func (p *Pool) Delete(ids []int64) int {
 	p.tokens = kept
 	p.store.Async(func(tx *sql.Tx) {
 		for id := range del {
-			execTx(tx, `DELETE FROM tokens WHERE id=?`, id)
+			store.ExecTx(tx, `DELETE FROM tokens WHERE id=?`, id)
 		}
 	})
 	return n
 }
 
-type PoolSummary struct {
+type Summary struct {
 	Total          int `json:"total"`
 	Active         int `json:"active"`
 	Exhausted      int `json:"exhausted"`
@@ -351,11 +348,11 @@ type PoolSummary struct {
 	Disabled       int `json:"disabled"`
 	Inflight       int `json:"inflight"`
 	UsedToday      int `json:"used_today"`
-	RemainingToday int `json:"remaining_today"` // -1 = 不限
+	RemainingToday int `json:"remaining_today"`
 }
 
-func (p *Pool) Summary() PoolSummary {
-	var s PoolSummary
+func (p *Pool) Summary() Summary {
+	var s Summary
 	unlimited := false
 	for _, t := range p.List() {
 		s.Total++

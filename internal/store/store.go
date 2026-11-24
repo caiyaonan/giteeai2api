@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"database/sql"
@@ -13,7 +13,6 @@ import (
 )
 
 // migrations 按顺序执行，索引 i 对应将数据库升级到 user_version = i+1。
-// 后续版本如需新增字段或索引，只需在切片末尾追加一条幂等/增量 SQL。
 var migrations = []string{
 	// v1: 初始表结构
 	`
@@ -59,10 +58,10 @@ CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);
 `,
 }
 
-// Store：读写分离。写入走单协程批量事务，避免高并发下 SQLite 锁竞争。
+// Store 读写分离的 SQLite 存储。异步写入走单协程批量事务，避免高并发下锁竞争。
 type Store struct {
-	r         *sql.DB
-	w         *sql.DB
+	R         *sql.DB
+	W         *sql.DB
 	ch        chan func(*sql.Tx)
 	done      chan struct{}
 	closeOnce sync.Once
@@ -70,7 +69,9 @@ type Store struct {
 	closed    bool
 }
 
-func openStore(dir string) *Store {
+func LatestSchemaVersion() int { return len(migrations) }
+
+func Open(dir string) *Store {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Fatal(err)
 	}
@@ -89,7 +90,7 @@ func openStore(dir string) *Store {
 		log.Fatal(err)
 	}
 	r.SetMaxOpenConns(8)
-	s := &Store{r: r, w: w, ch: make(chan func(*sql.Tx), 8192), done: make(chan struct{})}
+	s := &Store{R: r, W: w, ch: make(chan func(*sql.Tx), 8192), done: make(chan struct{})}
 	go s.writer()
 	return s
 }
@@ -145,23 +146,22 @@ func (s *Store) Close() {
 		close(s.ch)
 		s.mu.Unlock()
 		<-s.done
-		_, _ = s.w.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
-		_ = s.r.Close()
-		_ = s.w.Close()
+		_, _ = s.W.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+		_ = s.R.Close()
+		_ = s.W.Close()
 	})
 }
 
 func (s *Store) writer() {
 	defer close(s.done)
 	for fn := range s.ch {
-		tx, err := s.w.Begin()
+		tx, err := s.W.Begin()
 		if err != nil {
 			log.Println("store begin:", err)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		fn(tx)
-		// 合并队列中已有的写入到同一事务
 	drain:
 		for i := 0; i < 500; i++ {
 			select {
@@ -180,7 +180,7 @@ func (s *Store) writer() {
 	}
 }
 
-func execTx(tx *sql.Tx, q string, args ...any) {
+func ExecTx(tx *sql.Tx, q string, args ...any) {
 	if _, err := tx.Exec(q, args...); err != nil {
 		log.Println("store exec:", err, q)
 	}

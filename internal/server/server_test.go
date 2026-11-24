@@ -1,8 +1,7 @@
-package main
+package server
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -18,6 +17,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"giteeai2api/internal/auth"
+	"giteeai2api/internal/config"
+	"giteeai2api/internal/pool"
+	"giteeai2api/internal/store"
+	"giteeai2api/internal/upstream"
 )
 
 func makePNG(w, h int) []byte {
@@ -32,12 +37,12 @@ func makePNG(w, h int) []byte {
 	return buf.Bytes()
 }
 
-func newTestServer(t *testing.T, upstreamHandler http.HandlerFunc) (*App, *httptest.Server, func()) {
+func newTestServer(t *testing.T, upstreamHandler http.HandlerFunc) (*httptest.Server, func()) {
 	t.Helper()
 	upSrv := httptest.NewServer(upstreamHandler)
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "images"), 0o755)
-	cfg := loadConfig()
+	cfg := config.Load()
 	cfg.DataDir = dir
 	cfg.AdminPassword = "secret"
 	cfg.UpstreamBase = upSrv.URL + "/v1"
@@ -47,42 +52,28 @@ func newTestServer(t *testing.T, upstreamHandler http.HandlerFunc) (*App, *httpt
 	cfg.QueueTimeout = 3 * time.Second
 	cfg.UpstreamTimeout = 5 * time.Second
 
-	store := openStore(dir)
-	sum := sha256.Sum256([]byte("giteeai2api:" + cfg.AdminPassword))
-	app := &App{cfg: cfg, store: store, up: newUpstream(cfg), secret: sum[:]}
-	app.pool = newPool(cfg, store)
-	app.keys = newKeyStore(cfg, store)
+	st := store.Open(dir)
+	p := pool.New(cfg, st)
+	up := upstream.New(cfg)
+	ks := auth.New(cfg, st)
+	s := New(cfg, st, p, up, ks, BuildInfo{Version: "test", Commit: "0000000"})
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/images/generations", app.handleGenerations)
-	mux.HandleFunc("POST /v1/images/edits", app.handleEdits)
-	mux.HandleFunc("GET /v1/models", app.handleModels)
-	mux.Handle("GET /images/", http.StripPrefix("/images/", noDirFS(filepath.Join(dir, "images"))))
-	mux.HandleFunc("POST /admin/api/login", app.handleLogin)
-	mux.HandleFunc("GET /admin/api/overview", app.admin(app.handleOverview))
-	mux.HandleFunc("GET /admin/api/tokens", app.admin(app.handleTokenList))
-	mux.HandleFunc("POST /admin/api/tokens", app.admin(app.handleTokenAdd))
-	mux.HandleFunc("POST /admin/api/tokens/{id}/check", app.admin(app.handleTokenCheck))
-	mux.HandleFunc("POST /admin/api/keys", app.admin(app.handleKeyCreate))
-	mux.HandleFunc("GET /admin/api/logs", app.admin(app.handleLogs))
-
-	srv := httptest.NewServer(cors(mux))
+	srv := httptest.NewServer(s.Handler())
 	cleanup := func() {
 		srv.Close()
 		upSrv.Close()
-		store.Close()
+		st.Close()
 	}
-	return app, srv, cleanup
+	return srv, cleanup
 }
 
 func TestEndToEnd(t *testing.T) {
 	samplePNG := makePNG(16, 16)
 	sampleB64 := base64.StdEncoding.EncodeToString(samplePNG)
 
-	// 模拟 Gitee AI 上游：bad-tok 返回 401，quota-tok 返回 429 额度耗尽，good-tok 成功
 	up := func(w http.ResponseWriter, r *http.Request) {
-		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		switch auth {
+		authHdr := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		switch authHdr {
 		case "bad-tok":
 			w.WriteHeader(401)
 			w.Write([]byte(`{"error":{"message":"Unauthorized"}}`))
@@ -106,11 +97,10 @@ func TestEndToEnd(t *testing.T) {
 		})
 	}
 
-	_, srv, cleanup := newTestServer(t, up)
+	srv, cleanup := newTestServer(t, up)
 	defer cleanup()
 	hc := srv.Client()
 
-	// 1. 管理员登录
 	resp, err := hc.Post(srv.URL+"/admin/api/login", "application/json", strings.NewReader(`{"password":"secret"}`))
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("login failed: %v status=%v", err, resp)
@@ -131,7 +121,6 @@ func TestEndToEnd(t *testing.T) {
 		return r
 	}
 
-	// 2. 导入 3 个令牌（含失效与耗尽，验证自动故障转移）
 	r := adminReq("POST", "/admin/api/tokens", `{"tokens":"bad-tok\nquota-tok\ngood-tok","name":"batch"}`)
 	var addRes struct{ Added int }
 	json.NewDecoder(r.Body).Decode(&addRes)
@@ -140,16 +129,14 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("expected 3 tokens added, got %d", addRes.Added)
 	}
 
-	// 3. 创建客户端 API Key
 	r = adminReq("POST", "/admin/api/keys", `{"name":"test-client"}`)
-	var keyRes APIKey
+	var keyRes auth.APIKey
 	json.NewDecoder(r.Body).Decode(&keyRes)
 	r.Body.Close()
 	if !strings.HasPrefix(keyRes.Key, "sk-") {
 		t.Fatalf("unexpected api key: %+v", keyRes)
 	}
 
-	// 4. 调用 /v1/models
 	req, _ := http.NewRequest("GET", srv.URL+"/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer "+keyRes.Key)
 	r, err = hc.Do(req)
@@ -158,7 +145,6 @@ func TestEndToEnd(t *testing.T) {
 	}
 	r.Body.Close()
 
-	// 5. 文生图（gpt-image-2 + jpeg 转码，验证自动跳过 bad-tok 与 quota-tok 后由 good-tok 成功）
 	genReq, _ := http.NewRequest("POST", srv.URL+"/v1/images/generations",
 		strings.NewReader(`{"model":"gpt-image-2","prompt":"a cute cat","size":"1024x1536","quality":"high","output_format":"jpeg","n":2}`))
 	genReq.Header.Set("Authorization", "Bearer "+keyRes.Key)
@@ -173,7 +159,6 @@ func TestEndToEnd(t *testing.T) {
 		OutputFormat string                                   `json:"output_format"`
 		Size         string                                   `json:"size"`
 		Quality      string                                   `json:"quality"`
-		Usage        map[string]any                           `json:"usage"`
 	}
 	json.NewDecoder(r.Body).Decode(&genRes)
 	r.Body.Close()
@@ -185,7 +170,6 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("expected jpeg bytes, got %s", detectFormat(rawImg))
 	}
 
-	// 6. 文生图 response_format=url
 	urlReq, _ := http.NewRequest("POST", srv.URL+"/v1/images/generations",
 		strings.NewReader(`{"model":"gpt-image-2","prompt":"sunset","response_format":"url"}`))
 	urlReq.Header.Set("Authorization", "Bearer "+keyRes.Key)
@@ -204,7 +188,6 @@ func TestEndToEnd(t *testing.T) {
 	}
 	imgR.Body.Close()
 
-	// 7. 流式 SSE
 	sseReq, _ := http.NewRequest("POST", srv.URL+"/v1/images/generations",
 		strings.NewReader(`{"model":"gpt-image-2","prompt":"stream test","stream":true}`))
 	sseReq.Header.Set("Authorization", "Bearer "+keyRes.Key)
@@ -215,7 +198,6 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("unexpected sse body: %s", sseBody)
 	}
 
-	// 8. 改图 multipart /v1/images/edits
 	var mbuf bytes.Buffer
 	mw := multipart.NewWriter(&mbuf)
 	mw.WriteField("model", "gpt-image-2")
@@ -233,11 +215,10 @@ func TestEndToEnd(t *testing.T) {
 	}
 	r.Body.Close()
 
-	// 9. 验证令牌状态已正确更新（1 active, 1 invalid, 1 exhausted）与统计数据
-	time.Sleep(150 * time.Millisecond) // 等待异步落盘
+	time.Sleep(150 * time.Millisecond)
 	r = adminReq("GET", "/admin/api/overview", "")
 	var ov struct {
-		Pool  PoolSummary `json:"pool"`
+		Pool  pool.Summary `json:"pool"`
 		Today struct {
 			Total   int `json:"total"`
 			Success int `json:"success"`
@@ -255,23 +236,22 @@ func TestEndToEnd(t *testing.T) {
 
 func TestStoreMigrationAndGracefulClose(t *testing.T) {
 	dir := t.TempDir()
-	s := openStore(dir)
+	s := store.Open(dir)
 	var ver int
-	if err := s.r.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != len(migrations) {
-		t.Fatalf("expected schema version %d, got %d (err=%v)", len(migrations), ver, err)
+	if err := s.R.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != store.LatestSchemaVersion() {
+		t.Fatalf("expected schema version %d, got %d (err=%v)", store.LatestSchemaVersion(), ver, err)
 	}
 	for i := 0; i < 20; i++ {
 		s.Async(func(tx *sql.Tx) {
-			execTx(tx, `INSERT INTO logs(ts,endpoint,model,status) VALUES(1,'generations','gpt-image-2',200)`)
+			store.ExecTx(tx, `INSERT INTO logs(ts,endpoint,model,status) VALUES(1,'generations','gpt-image-2',200)`)
 		})
 	}
-	s.Close() // 必须等全部异步写入刷盘完成
+	s.Close()
 
-	// 重新打开确认 20 条记录全部持久化
-	s2 := openStore(dir)
+	s2 := store.Open(dir)
 	defer s2.Close()
 	var cnt int
-	if err := s2.r.QueryRow(`SELECT COUNT(*) FROM logs`).Scan(&cnt); err != nil || cnt != 20 {
+	if err := s2.R.QueryRow(`SELECT COUNT(*) FROM logs`).Scan(&cnt); err != nil || cnt != 20 {
 		t.Fatalf("expected 20 persisted logs after Close, got %d (err=%v)", cnt, err)
 	}
 }
