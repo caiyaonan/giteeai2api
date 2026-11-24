@@ -36,8 +36,13 @@ th{color:var(--muted);font-weight:500;white-space:nowrap}tbody tr:hover{backgrou
 .chart svg{width:100%;height:180px;display:block}.chart text{fill:var(--muted);font-size:10px}
 .login{max-width:360px;margin:15vh auto}.login input{width:100%;margin:12px 0}
 pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font-size:12px}
-.imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-top:14px}.imgs img{width:100%;border-radius:8px;border:1px solid var(--line)}
-#toast{position:fixed;right:20px;bottom:20px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 16px;display:none;z-index:9;box-shadow:0 4px 20px #0004}
+.imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-top:14px}
+.img-card{background:var(--panel2);border:1px solid var(--line);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
+.img-card img{width:100%;display:block;cursor:zoom-in;aspect-ratio:1/1;object-fit:cover}
+.img-card .bar-act{display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);font-size:12px}
+#lightbox{position:fixed;inset:0;background:#000c;z-index:20;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:12px}
+#lightbox img{max-width:92vw;max-height:82vh;border-radius:8px;box-shadow:0 8px 32px #0008;cursor:zoom-out}
+#toast{position:fixed;right:20px;bottom:20px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 16px;display:none;z-index:30;box-shadow:0 4px 20px #0004}
 .hide{display:none!important}
 </style>
 </head>
@@ -155,7 +160,7 @@ pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padd
       <input id="pN" type="number" value="1" min="1" max="10" style="width:70px" title="数量 n">
     </div>
     <textarea id="pPrompt" rows="4" style="width:100%" placeholder="输入提示词，支持中英文">一只戴着宇航员头盔的橘猫漂浮在太空中，背景是绚丽的星云，电影级光影，超高清</textarea>
-    <div class="row" style="margin-top:10px"><button class="btn pri" id="pBtn" onclick="play()">生成</button><span class="muted" id="pMsg"></span></div>
+    <div class="row" style="margin-top:10px"><button class="btn pri" id="pBtn" onclick="play()">生成</button><button class="btn sm danger hide" id="pClearBtn" onclick="clearPlayImgs()">清空图片</button><span class="muted" id="pMsg"></span></div>
     <div class="imgs" id="pImgs"></div>
   </div>
 </section>
@@ -165,6 +170,14 @@ pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padd
   <div class="card"><h3>接口文档（兼容 OpenAI Images API）</h3><div id="docBody"></div></div>
 </section>
 </main>
+</div>
+<div id="lightbox" class="hide" onclick="if(event.target===this)closeLightbox()">
+  <img id="lbImg" onclick="closeLightbox()" alt="预览大图">
+  <div class="row">
+    <span class="muted" id="lbMeta" style="color:#ccc"></span>
+    <a class="btn pri sm" id="lbDown" download>下载原图</a>
+    <button class="btn sm" onclick="closeLightbox()">关闭 (Esc)</button>
+  </div>
 </div>
 <div id="toast"></div>
 
@@ -336,12 +349,36 @@ async function loadLogs() {
 }
 
 // ---------- 在线测试 ----------
+let playImgs = [], playSeq = 0;
 async function loadPlay() {
   if (!keys.length) { const d = await api('/keys'); keys = d.data || []; }
   const v = $('#pKey').value;
   $('#pKey').innerHTML = keys.filter(k => k.enabled).map(k => `<option value="${k.key}">${esc(k.name || '密钥 #' + k.id)} (${k.key.slice(0, 10)}…)</option>`).join('') || '<option value="">请先在「API 密钥」创建密钥</option>';
   if (v) $('#pKey').value = v;
 }
+function renderPlayImgs() {
+  $('#pClearBtn').classList.toggle('hide', !playImgs.length);
+  $('#pImgs').innerHTML = playImgs.map(it => `<div class="img-card">
+    <img src="${it.src}" alt="preview" title="点击放大" onclick="openLightbox(${it.id})">
+    <div class="bar-act">
+      <span class="muted">${esc(it.meta)}</span><span class="sp"></span>
+      <button class="btn sm" onclick="openLightbox(${it.id})">放大</button>
+      <a class="btn sm" href="${it.src}" download="${it.filename}" style="text-decoration:none">下载</a>
+      <button class="btn sm danger" onclick="delPlayImg(${it.id})">删除</button>
+    </div></div>`).join('');
+}
+function openLightbox(id) {
+  const it = playImgs.find(x => x.id === id); if (!it) return;
+  $('#lbImg').src = it.src;
+  $('#lbMeta').textContent = it.meta;
+  $('#lbDown').href = it.src;
+  $('#lbDown').download = it.filename;
+  $('#lightbox').classList.remove('hide');
+}
+function closeLightbox() { $('#lightbox').classList.add('hide'); }
+function delPlayImg(id) { playImgs = playImgs.filter(x => x.id !== id); renderPlayImgs(); }
+function clearPlayImgs() { if (confirm('确认清空当前测试生成的图片？')) { playImgs = []; renderPlayImgs(); } }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
 async function play() {
   const key = $('#pKey').value; if (!key) return toast('请先创建 API 密钥');
   const btn = $('#pBtn'), t0 = Date.now(); btn.disabled = true; $('#pMsg').textContent = '生成中，2K 大图约需 10~60 秒…';
@@ -351,7 +388,16 @@ async function play() {
     const j = await r.json();
     if (!r.ok) throw new Error(j.error?.message || 'HTTP ' + r.status);
     const mime = j.output_format === 'jpeg' ? 'image/jpeg' : 'image/png';
-    $('#pImgs').innerHTML = j.data.map(d => `<a href="data:${mime};base64,${d.b64_json}" download="image.${j.output_format === 'jpeg' ? 'jpg' : 'png'}"><img src="data:${mime};base64,${d.b64_json}"></a>`).join('') + $('#pImgs').innerHTML;
+    const ext = j.output_format === 'jpeg' ? 'jpg' : 'png';
+    const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    const added = j.data.map((d, idx) => ({
+      id: ++playSeq,
+      src: `data:${mime};base64,${d.b64_json}`,
+      filename: `giteeai-${ts}-${idx + 1}.${ext}`,
+      meta: `${j.size} · ${j.quality}`
+    }));
+    playImgs = [...added, ...playImgs];
+    renderPlayImgs();
     $('#pMsg').textContent = `✅ 完成 ${j.data.length} 张 · ${j.size} · ${j.quality} · 耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s · usage ${j.usage.total_tokens} tokens`;
   } catch (e) { $('#pMsg').textContent = '❌ ' + e.message; } finally { btn.disabled = false; }
 }
