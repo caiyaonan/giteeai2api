@@ -90,9 +90,18 @@ go build -trimpath -ldflags="-s -w" -o giteeai2api .
 ## 首次使用
 
 1. 浏览器访问管理后台：`http://localhost:8080/admin`（使用 `.env` 中设置的 `ADMIN_PASSWORD` 登录）。
-2. 准备您本人合法持有的 Gitee AI 访问令牌：
-   - 登录 [https://ai.gitee.com/serverless-api](https://ai.gitee.com/serverless-api) → 选择模型 → 点击「API」→「添加令牌」。
-   - 令牌可用额度与计费策略以 Gitee AI 官方平台实时规则为准。
+2. 准备您本人合法持有的 Gitee AI（模力方舟）访问令牌：
+   - **步骤 1**：登录 [Gitee AI（模力方舟）](https://ai.gitee.com/serverless-api)，进入顶部「**模型广场**」→ 左侧「**图像生成与处理**」→ 找到并点击 `z-image-turbo`。
+
+     ![步骤1：进入模型广场选择 z-image-turbo](./docs/screenshots/token-step-1.jpg)
+
+   - **步骤 2**：在右侧弹出的模型详情页中，点击「**在线体验**」。
+
+     ![步骤2：点击在线体验](./docs/screenshots/token-step-2.jpg)
+
+   - **步骤 3**：切换到「**API**」标签页，即可在右侧代码示例中看到并复制你的访问令牌（`api_key`）。令牌可用额度与计费策略以平台实时规则为准。
+
+     ![步骤3：切换到 API 标签复制访问令牌](./docs/screenshots/token-step-3.jpg)
 3. 在后台「**令牌池**」批量粘贴导入令牌，可点击「全部检测」确认有效。
 4. 在后台「**API 密钥**」创建一个 `sk-xxx` 密钥，即可在任意支持 OpenAI Images API 的客户端中使用。
 
