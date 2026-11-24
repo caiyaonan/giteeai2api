@@ -156,13 +156,13 @@ func (s *Server) parseSize(raw string) (int, int, error) {
 	if !ok || e1 != nil || e2 != nil || w <= 0 || h <= 0 {
 		return 0, 0, fmt.Errorf("invalid 'size': %q, expected format like 1024x1024 or auto", str)
 	}
+	if w > s.cfg.MaxSide || h > s.cfg.MaxSide {
+		return 0, 0, fmt.Errorf("invalid 'size': %dx%d exceeds maximum supported size %dx%d", w, h, s.cfg.MaxSide, s.cfg.MaxSide)
+	}
 	if r := float64(max(w, h)) / float64(min(w, h)); r > 3 {
 		return 0, 0, errors.New("invalid 'size': aspect ratio must not exceed 3:1")
 	}
-	if m := max(w, h); m > s.cfg.MaxSide {
-		w, h = w*s.cfg.MaxSide/m, h*s.cfg.MaxSide/m
-	}
-	align := func(v int) int { return max((v+8)/16*16, 256) }
+	align := func(v int) int { return min(max((v+8)/16*16, 256), s.cfg.MaxSide) }
 	return align(w), align(h), nil
 }
 

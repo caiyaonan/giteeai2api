@@ -412,7 +412,7 @@ async function loadDocs() {
   $('#docBody').innerHTML = `
   <p><b>Base URL</b>：<code class="mono">${base}/v1</code>　<b>鉴权</b>：<code class="mono">Authorization: Bearer sk-xxx</code>（或 <code class="mono">x-api-key: sk-xxx</code>，在「API 密钥」创建）</p>
   <p><b>模型映射</b>：${Object.entries(c.model_map).map(([k, v]) => `<code class="mono">${esc(k)}</code> → ${esc(v)}`).join('，')}；未命中映射的模型名原样透传给 Gitee AI。</p>
-  <p><b>尺寸限制</b>：最大支持 <b>${c.max_side}×${c.max_side}</b>（单边最小 256，超出 ${c.max_side} 自动等比缩放，宽高自动 16 对齐，宽高比 ≤ 3:1）；<code class="mono">size=auto</code> 或省略时默认 <code class="mono">${c.default_size}</code>。</p>
+  <p><b>尺寸限制</b>：最大支持 <b>${c.max_side}×${c.max_side}</b>（单边最小 256，超出 ${c.max_side}×${c.max_side} 直接返回 <code class="mono">400 invalid_value</code>，宽高自动 16 对齐，宽高比 ≤ 3:1）；<code class="mono">size=auto</code> 或省略时默认 <code class="mono">${c.default_size}</code>。</p>
   <p><b>质量档位 → 推理步数</b>：${Object.entries(c.quality_steps).map(([k, v]) => `${k}=${v}`).join('，')}；<b>令牌池</b>：单令牌每日 ${c.daily_limit || '不限'} 张，单令牌并发 ${c.token_concurrency}，失败换令牌重试 ${c.max_retries} 次。</p>
 
   <h4>接口一览</h4>

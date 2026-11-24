@@ -197,6 +197,20 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("unexpected sse body: %s", sseBody)
 	}
 
+	// 超出 2048x2048 应直接返回 400 提示不支持超过，不消耗令牌
+	bigReq, _ := http.NewRequest("POST", srv.URL+"/v1/images/generations",
+		strings.NewReader(`{"model":"gpt-image-2","prompt":"too big","size":"2049x2048"}`))
+	bigReq.Header.Set("Authorization", "Bearer "+keyRes.Key)
+	r, err = hc.Do(bigReq)
+	if err != nil || r.StatusCode != 400 {
+		t.Fatalf("expected 400 for oversized request, got err=%v status=%v", err, r)
+	}
+	bigBody, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	if !strings.Contains(string(bigBody), "exceeds maximum supported size 2048x2048") {
+		t.Fatalf("unexpected oversized error body: %s", bigBody)
+	}
+
 	// /v1/images/edits 不允许编辑，直接返回 400 unsupported_endpoint 且不消耗令牌
 	editReq, _ := http.NewRequest("POST", srv.URL+"/v1/images/edits", strings.NewReader(`{}`))
 	editReq.Header.Set("Authorization", "Bearer "+keyRes.Key)

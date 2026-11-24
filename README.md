@@ -39,7 +39,7 @@
 
 - **OpenAI Images API 深度兼容（模拟 `gpt-image-2`）**
   - `POST /v1/images/generations`：支持 `gpt-image-2`、`gpt-image-1.5`、`gpt-image-1`、`gpt-image-1-mini`、`dall-e-3`、`dall-e-2` 自动映射至 `z-image-turbo`（未命中映射的模型名原样透传给上游，支持 `MODEL_MAP` 自定义）。
-  - 支持 `n`（1~10 并发生成）、`size`（`auto` 或 `WxH`，最大 **`2048×2048`**，超出等比缩放并自动 16 对齐）、`quality`（`low`/`medium`/`high`/`auto`/`standard`/`hd` 映射推理步数）、`output_format`（`png`/`jpeg` 转码）、`output_compression`、`response_format`（`b64_json` / `url` 本地临时直链）、`stream=true`（OpenAI SSE 事件流）与 `usage` Token 估算。
+  - 支持 `n`（1~10 并发生成）、`size`（`auto` 或 `WxH`，最大 **`2048×2048`**，超出报错拦截，自动 16 对齐）、`quality`（`low`/`medium`/`high`/`auto`/`standard`/`hd` 映射推理步数）、`output_format`（`png`/`jpeg` 转码）、`output_compression`、`response_format`（`b64_json` / `url` 本地临时直链）、`stream=true`（OpenAI SSE 事件流）与 `usage` Token 估算。
   - 兼容扩展参数：`negative_prompt`、`num_inference_steps`、`guidance_scale`、`seed`。
   - `GET /v1/models`：返回可用模型列表，开箱接入各类 OpenAI 客户端与 SDK。
   - 仅支持文生图，`POST /v1/images/edits` 将直接返回 `400 unsupported_endpoint`（不消耗上游令牌）。
@@ -111,7 +111,7 @@ go build -trimpath -ldflags="-s -w" -o giteeai2api ./cmd/giteeai2api
 
 - **Base URL**：`http://localhost:8080/v1`
 - **鉴权方式**：`Authorization: Bearer sk-your-key`（或 `x-api-key: sk-your-key`）
-- **尺寸限制**：最大 **`2048×2048`**（由 `MAX_SIDE` 控制，单边最小 `256`，超出上限按原比例等比缩放，宽高自动对齐 16 的倍数，宽高比不超过 `3:1`）
+- **尺寸限制**：最大 **`2048×2048`**（由 `MAX_SIDE` 控制，单边最小 `256`，宽高任一超过 `2048` 直接返回 `400 invalid_value` 提示不支持超过；合法范围内宽高自动对齐 16 的倍数，宽高比不超过 `3:1`）
 
 ### 端点一览
 
@@ -282,7 +282,7 @@ data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","
 | `QUEUE_TIMEOUT_SEC` | `60` | 令牌全忙时的最大排队等待时间（秒） |
 | `UPSTREAM_TIMEOUT_SEC` | `180` | 单次上游请求超时时间（秒） |
 | `DEFAULT_SIZE` | `1024x1024` | `size=auto` 或省略时的默认尺寸 |
-| `MAX_SIDE` | `2048` | 最大边长限制（超出等比缩放） |
+| `MAX_SIDE` | `2048` | 最大边长限制（宽高任一超过该值将返回 `400` 报错） |
 | `QUALITY_STEPS` | `low=6,medium=9,high=12` | 质量档位与推理步数映射 |
 | `DEFAULT_NEGATIVE_PROMPT` | *(空)* | 默认负面提示词 |
 | `PUBLIC_BASE_URL` | *(空)* | `response_format=url` 时的对外域名（留空则自动推断） |
@@ -294,7 +294,7 @@ data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","
 ## 兼容边界说明
 
 - **图片编辑（`/v1/images/edits`）**：不支持图片编辑，请求该端点将直接返回 `400`（`code: "unsupported_endpoint"`），不消耗上游令牌。
-- **最大分辨率**：受上游限制最大支持 `2048×2048`（超出时自动等比缩放至 `MAX_SIDE` 以内并按 16 对齐）。
+- **最大分辨率**：受上游限制最大支持 `2048×2048`，超出时直接返回 `400 invalid_value`（不消耗令牌）。
 - **透明背景**：上游模型不支持透明通道，`background=transparent` 将回退为 `opaque` 并在响应中如实返回。
 - **WebP 编码**：`output_format=png` / `jpeg` 支持自动转码与压缩；`webp` 暂不重新编码，会保留上游原格式并在响应 `output_format` 中如实标明。
 
