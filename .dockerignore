@@ -1,0 +1,10 @@
+.git
+.env
+data/
+giteeai2api
+giteeai2api.exe
+*.db
+*.db-wal
+*.db-shm
+README.md
+docs/

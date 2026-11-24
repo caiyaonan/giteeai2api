@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GiteeAI2API 管理后台</title>
+<style>
+:root{--bg:#0f1117;--panel:#171a23;--panel2:#1f2330;--line:#2a2f3e;--text:#e6e8ef;--muted:#8b91a3;--pri:#6c8cff;--ok:#2ecc71;--bad:#ff5c6c;--warn:#f5a623;--r:10px}
+@media (prefers-color-scheme:light){:root{--bg:#f4f6fb;--panel:#fff;--panel2:#f0f2f8;--line:#e2e5ee;--text:#1d2130;--muted:#6b7183}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+a{color:var(--pri)}button,input,select,textarea{font:inherit;color:inherit}
+.btn{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--pri)}.btn.pri{background:var(--pri);border-color:var(--pri);color:#fff}.btn.danger{color:var(--bad)}.btn.sm{padding:2px 8px;font-size:12px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+input,select,textarea{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--pri)}
+header{display:flex;align-items:center;gap:24px;padding:0 24px;height:56px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header h1{font-size:16px;margin:0}header nav{display:flex;gap:4px;flex:1;overflow:auto}
+header nav a{padding:8px 14px;border-radius:8px;color:var(--muted);text-decoration:none;cursor:pointer;white-space:nowrap}
+header nav a.on{background:var(--panel2);color:var(--text)}
+main{max-width:1280px;margin:0 auto;padding:24px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px;margin-bottom:18px}
+.card h3{margin:0 0 14px;font-size:15px;display:flex;align-items:center;gap:10px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;margin-bottom:18px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px}
+.stat .k{color:var(--muted);font-size:12px}.stat .v{font-size:26px;font-weight:600;margin-top:4px}.stat .s{color:var(--muted);font-size:12px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.sp{flex:1}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}@media(max-width:900px){.two{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+th{color:var(--muted);font-weight:500;white-space:nowrap}tbody tr:hover{background:var(--panel2)}
+.tbl{overflow:auto}
+.badge{display:inline-block;padding:1px 8px;border-radius:20px;font-size:12px;background:var(--panel2);border:1px solid var(--line)}
+.badge.ok{color:var(--ok);border-color:#2ecc7155}.badge.bad{color:var(--bad);border-color:#ff5c6c55}.badge.warn{color:var(--warn);border-color:#f5a62355}
+.bar{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;min-width:80px}.bar i{display:block;height:100%;background:var(--pri)}
+.muted{color:var(--muted)}.mono{font-family:Consolas,Menlo,monospace;font-size:12px}.err{color:var(--bad);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chart svg{width:100%;height:180px;display:block}.chart text{fill:var(--muted);font-size:10px}
+.login{max-width:360px;margin:15vh auto}.login input{width:100%;margin:12px 0}
+pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font-size:12px}
+.imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-top:14px}.imgs img{width:100%;border-radius:8px;border:1px solid var(--line)}
+#toast{position:fixed;right:20px;bottom:20px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 16px;display:none;z-index:9;box-shadow:0 4px 20px #0004}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<div id="loginView" class="login card hide">
+  <h3>🔐 GiteeAI2API 管理后台</h3>
+  <input id="pwd" type="password" placeholder="管理员密码" onkeydown="if(event.key==='Enter')login()">
+  <button class="btn pri" style="width:100%" onclick="login()">登录</button>
+</div>
+
+<div id="appView" class="hide">
+<header>
+  <h1>🎨 GiteeAI2API</h1>
+  <nav id="nav">
+    <a data-tab="overview" class="on">概览</a><a data-tab="tokens">令牌池</a><a data-tab="keys">API 密钥</a>
+    <a data-tab="logs">请求日志</a><a data-tab="play">在线测试</a><a data-tab="docs">接口文档</a>
+  </nav>
+  <button class="btn sm" onclick="logout()">退出</button>
+</header>
+<main>
+<!-- 概览 -->
+<section id="tab-overview">
+  <div class="grid" id="stats"></div>
+  <div class="card chart"><h3>近 24 小时请求 <span class="muted" style="font-size:12px">绿=成功 红=失败</span></h3><div id="hourly"></div></div>
+  <div class="card chart"><h3>近 14 天请求</h3><div id="daily"></div></div>
+  <div class="two">
+    <div class="card"><h3>今日模型分布</h3><div class="tbl" id="models"></div></div>
+    <div class="card"><h3>今日密钥用量</h3><div class="tbl" id="keyUse"></div></div>
+  </div>
+  <div class="card"><h3>今日错误 Top</h3><div class="tbl" id="errs"></div></div>
+</section>
+
+<!-- 令牌池 -->
+<section id="tab-tokens" class="hide">
+  <div class="card">
+    <h3>批量导入 Gitee AI 令牌</h3>
+    <textarea id="newTokens" rows="4" style="width:100%" placeholder="每行一个令牌（也支持逗号分隔），重复的会自动跳过"></textarea>
+    <div class="row" style="margin-top:10px">
+      <input id="newName" placeholder="备注名（可选）">
+      <input id="newLimit" type="number" placeholder="每日额度（0=默认）" style="width:170px">
+      <button class="btn pri" onclick="addTokens()">导入</button>
+      <span class="muted">令牌获取：<a href="https://ai.gitee.com/serverless-api" target="_blank">ai.gitee.com/serverless-api</a> → 任一模型 → API → 添加令牌</span>
+    </div>
+  </div>
+  <div class="card">
+    <h3>令牌列表 <span id="poolSum" class="muted" style="font-size:12px;font-weight:400"></span></h3>
+    <div class="row" style="margin-bottom:12px">
+      <select id="tokFilter" onchange="renderTokens()">
+        <option value="">全部状态</option><option value="active">可用</option><option value="exhausted">额度用尽</option>
+        <option value="invalid">失效</option><option value="disabled">已禁用</option>
+      </select>
+      <span class="sp"></span>
+      <span class="muted" id="selCount"></span>
+      <button class="btn sm" onclick="batch('enable')">启用</button>
+      <button class="btn sm" onclick="batch('disable')">禁用</button>
+      <button class="btn sm" onclick="batch('reset')">重置状态</button>
+      <button class="btn sm danger" onclick="batch('delete')">删除</button>
+      <button class="btn sm" id="checkAllBtn" onclick="checkAll()">全部检测</button>
+    </div>
+    <div class="tbl"><table>
+      <thead><tr><th><input type="checkbox" id="selAll" onchange="selAll(this.checked)"></th><th>ID</th><th>备注</th><th>令牌</th><th>状态</th>
+      <th>今日用量</th><th>成功/失败</th><th>在途</th><th>最近使用</th><th>最近错误</th><th>操作</th></tr></thead>
+      <tbody id="tokBody"></tbody>
+    </table></div>
+  </div>
+</section>
+
+<!-- API 密钥 -->
+<section id="tab-keys" class="hide">
+  <div class="card">
+    <h3>客户端 API 密钥 <span class="muted" style="font-size:12px;font-weight:400">下游调用 /v1 接口时使用：Authorization: Bearer sk-xxx</span></h3>
+    <div class="row" style="margin-bottom:12px">
+      <input id="keyName" placeholder="密钥备注名，如：我的应用">
+      <button class="btn pri" onclick="createKey()">创建密钥</button>
+      <span class="muted" id="staticKeys"></span>
+    </div>
+    <div class="tbl"><table>
+      <thead><tr><th>ID</th><th>备注</th><th>密钥</th><th>状态</th><th>累计请求</th><th>最近使用</th><th>创建时间</th><th>操作</th></tr></thead>
+      <tbody id="keyBody"></tbody>
+    </table></div>
+  </div>
+</section>
+
+<!-- 日志 -->
+<section id="tab-logs" class="hide">
+  <div class="card">
+    <h3>请求日志 <span class="muted" style="font-size:12px;font-weight:400">每张图一条记录</span></h3>
+    <div class="row" style="margin-bottom:12px">
+      <select id="logStatus" onchange="logPage=0;loadLogs()"><option value="">全部</option><option value="ok">成功</option><option value="fail">失败</option></select>
+      <button class="btn sm" onclick="loadLogs()">刷新</button><span class="sp"></span>
+      <span class="muted" id="logInfo"></span>
+      <button class="btn sm" onclick="logPage=Math.max(0,logPage-1);loadLogs()">上一页</button>
+      <button class="btn sm" onclick="logPage++;loadLogs()">下一页</button>
+    </div>
+    <div class="tbl"><table>
+      <thead><tr><th>时间</th><th>接口</th><th>模型</th><th>上游模型</th><th>尺寸</th><th>状态</th><th>耗时</th><th>尝试</th><th>密钥</th><th>令牌</th><th>错误</th></tr></thead>
+      <tbody id="logBody"></tbody>
+    </table></div>
+  </div>
+</section>
+
+<!-- 在线测试 -->
+<section id="tab-play" class="hide">
+  <div class="card">
+    <h3>在线测试 /v1/images/generations</h3>
+    <div class="row" style="margin-bottom:10px">
+      <select id="pKey" style="min-width:260px"></select>
+      <select id="pModel"><option>gpt-image-2</option><option>gpt-image-1</option><option>dall-e-3</option><option>z-image-turbo</option></select>
+      <select id="pSize">
+        <option value="auto">auto</option><option>1024x1024</option><option>1536x1024</option><option>1024x1536</option>
+        <option>2048x2048</option><option>2048x1152</option><option>1152x2048</option><option>2048x1536</option><option>1536x2048</option>
+      </select>
+      <select id="pQuality"><option>auto</option><option>low</option><option>medium</option><option>high</option></select>
+      <select id="pFormat"><option>png</option><option>jpeg</option></select>
+      <input id="pN" type="number" value="1" min="1" max="10" style="width:70px" title="数量 n">
+    </div>
+    <textarea id="pPrompt" rows="4" style="width:100%" placeholder="输入提示词，支持中英文">一只戴着宇航员头盔的橘猫漂浮在太空中，背景是绚丽的星云，电影级光影，超高清</textarea>
+    <div class="row" style="margin-top:10px"><button class="btn pri" id="pBtn" onclick="play()">生成</button><span class="muted" id="pMsg"></span></div>
+    <div class="imgs" id="pImgs"></div>
+  </div>
+</section>
+
+<!-- 文档 -->
+<section id="tab-docs" class="hide">
+  <div class="card"><h3>接口文档（兼容 OpenAI Images API）</h3><div id="docBody"></div></div>
+</section>
+</main>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtT = ts => ts ? new Date(ts * 1000).toLocaleString('zh-CN', {hour12: false}) : '-';
+const ago = ts => { if (!ts) return '-'; const d = Date.now() / 1000 - ts; return d < 60 ? Math.floor(d) + '秒前' : d < 3600 ? Math.floor(d / 60) + '分钟前' : d < 86400 ? Math.floor(d / 3600) + '小时前' : fmtT(ts); };
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2500); }
+async function api(path, opt = {}) {
+  const r = await fetch('/admin/api' + path, {headers: {'Content-Type': 'application/json'}, ...opt, body: opt.body ? JSON.stringify(opt.body) : undefined});
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && path !== '/login') { showLogin(); throw new Error('未登录'); }
+  if (!r.ok) throw new Error(j.error?.message || ('HTTP ' + r.status));
+  return j;
+}
+function showLogin() { $('#loginView').classList.remove('hide'); $('#appView').classList.add('hide'); }
+async function login() {
+  try { await api('/login', {method: 'POST', body: {password: $('#pwd').value}}); $('#loginView').classList.add('hide'); $('#appView').classList.remove('hide'); go('overview'); }
+  catch (e) { toast(e.message); }
+}
+async function logout() { await api('/logout', {method: 'POST'}); showLogin(); }
+
+// ---------- 标签页 ----------
+let cur = 'overview', timer;
+document.querySelectorAll('#nav a').forEach(a => a.onclick = () => go(a.dataset.tab));
+function go(tab) {
+  cur = tab; location.hash = tab;
+  document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
+  document.querySelectorAll('main section').forEach(s => s.classList.toggle('hide', s.id !== 'tab-' + tab));
+  refresh();
+  clearInterval(timer);
+  if (['overview', 'tokens', 'logs'].includes(tab)) timer = setInterval(refresh, 10000);
+}
+function refresh() {
+  ({overview: loadOverview, tokens: loadTokens, keys: loadKeys, logs: loadLogs, play: loadPlay, docs: loadDocs})[cur]?.().catch(e => toast(e.message));
+}
+
+// ---------- 概览 ----------
+function chart(el, data, fmt) {
+  const W = 1000, H = 180, P = 22, n = data.length, max = Math.max(1, ...data.map(d => d.total));
+  const bw = (W - P * 2) / n;
+  let s = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`;
+  for (let i = 0; i <= 4; i++) { const y = P + (H - P * 2) * i / 4; s += `<line x1="${P}" x2="${W - P}" y1="${y}" y2="${y}" stroke="currentColor" opacity=".08"/>`; }
+  s += `<text x="2" y="${P}">${max}</text>`;
+  data.forEach((d, i) => {
+    const x = P + i * bw + bw * .15, w = bw * .7, hh = H - P * 2;
+    const hs = d.success / max * hh, hf = d.fail / max * hh, base = H - P;
+    s += `<g><title>${fmt(d.t)}  总:${d.total} 成功:${d.success} 失败:${d.fail}</title>`;
+    s += `<rect x="${x}" y="${base - hs}" width="${w}" height="${hs}" fill="var(--ok)" rx="2"/>`;
+    s += `<rect x="${x}" y="${base - hs - hf}" width="${w}" height="${hf}" fill="var(--bad)" rx="2"/>`;
+    s += `<rect x="${x}" y="${P}" width="${w}" height="${hh}" fill="transparent"/></g>`;
+    if (i % Math.ceil(n / 12) === 0) s += `<text x="${x}" y="${H - 6}">${fmt(d.t)}</text>`;
+  });
+  el.innerHTML = s + '</svg>';
+}
+function kvTable(rows, cols) {
+  if (!rows?.length) return '<div class="muted">暂无数据</div>';
+  return '<table><thead><tr>' + cols.map(c => `<th>${c[0]}</th>`).join('') + '</tr></thead><tbody>' +
+    rows.map(r => '<tr>' + cols.map(c => `<td>${c[1](r)}</td>`).join('') + '</tr>').join('') + '</tbody></table>';
+}
+async function loadOverview() {
+  const d = await api('/overview'), p = d.pool, t = d.today;
+  const rate = t.total ? (t.success / t.total * 100).toFixed(1) + '%' : '-';
+  const st = [
+    ['今日请求', t.total, `成功 ${t.success} · 失败 ${t.fail}`],
+    ['今日成功率', rate, `累计 ${d.all.total} 次`],
+    ['平均耗时', t.avg_latency_ms ? (t.avg_latency_ms / 1000).toFixed(1) + 's' : '-', '成功请求'],
+    ['可用令牌', `${p.active}/${p.total}`, `用尽 ${p.exhausted} · 失效 ${p.invalid} · 禁用 ${p.disabled}`],
+    ['今日剩余额度', p.remaining_today < 0 ? '不限' : p.remaining_today, `今日已用 ${p.used_today} 张`],
+    ['在途请求', p.inflight, '正在生成中'],
+  ];
+  $('#stats').innerHTML = st.map(s => `<div class="stat"><div class="k">${s[0]}</div><div class="v">${s[1]}</div><div class="s">${s[2]}</div></div>`).join('');
+  chart($('#hourly'), d.hourly, t => new Date(t * 1000).getHours() + ':00');
+  chart($('#daily'), d.daily, t => { const x = new Date(t * 1000); return (x.getMonth() + 1) + '/' + x.getDate(); });
+  const rateCol = ['成功率', r => r.total ? (r.success / r.total * 100).toFixed(1) + '%' : '-'];
+  $('#models').innerHTML = kvTable(d.models, [['模型', r => esc(r.name)], ['请求', r => r.total], ['成功', r => r.success], rateCol]);
+  $('#keyUse').innerHTML = kvTable(d.keys, [['密钥', r => esc(r.name)], ['请求', r => r.total], ['成功', r => r.success], rateCol]);
+  $('#errs').innerHTML = kvTable(d.errors, [['错误信息', r => `<span class="mono">${esc(r.name)}</span>`], ['次数', r => r.total]]);
+}
+
+// ---------- 令牌池 ----------
+let tokens = [], selected = new Set();
+const stBadge = t => !t.enabled ? '<span class="badge">已禁用</span>' :
+  t.status === 'active' ? (t.cooldown_until > Date.now() / 1000 ? '<span class="badge warn">冷却中</span>' : '<span class="badge ok">可用</span>') :
+  t.status === 'exhausted' ? '<span class="badge warn">额度用尽</span>' : '<span class="badge bad">失效</span>';
+async function loadTokens() {
+  const d = await api('/tokens'); tokens = d.data || []; const s = d.summary;
+  $('#poolSum').textContent = `共 ${s.total} 个 · 可用 ${s.active} · 用尽 ${s.exhausted} · 失效 ${s.invalid} · 禁用 ${s.disabled} · 今日剩余 ${s.remaining_today < 0 ? '不限' : s.remaining_today} 张`;
+  renderTokens();
+}
+function renderTokens() {
+  const f = $('#tokFilter').value;
+  const list = tokens.filter(t => !f || (f === 'disabled' ? !t.enabled : t.enabled && t.status === f));
+  $('#tokBody').innerHTML = list.map(t => {
+    const pct = t.limit > 0 ? Math.min(100, t.used_today / t.limit * 100) : 0;
+    return `<tr>
+    <td><input type="checkbox" ${selected.has(t.id) ? 'checked' : ''} onchange="sel(${t.id},this.checked)"></td>
+    <td>${t.id}</td><td>${esc(t.name) || '<span class="muted">-</span>'}</td><td class="mono">${esc(t.token)}</td><td>${stBadge(t)}</td>
+    <td><div>${t.used_today}/${t.limit > 0 ? t.limit : '∞'}</div><div class="bar"><i style="width:${pct}%"></i></div></td>
+    <td><span style="color:var(--ok)">${t.success_total}</span> / <span style="color:var(--bad)">${t.fail_total}</span></td>
+    <td>${t.inflight}</td><td>${ago(t.last_used_at)}</td><td class="err" title="${esc(t.last_error)}">${esc(t.last_error) || '-'}</td>
+    <td class="row" style="flex-wrap:nowrap">
+      <button class="btn sm" onclick="checkTok(${t.id},this)">检测</button>
+      <button class="btn sm" onclick="editTok(${t.id})">编辑</button>
+      <button class="btn sm" onclick="patchTok(${t.id},{enabled:${!t.enabled}})">${t.enabled ? '禁用' : '启用'}</button>
+    </td></tr>`;
+  }).join('') || '<tr><td colspan="11" class="muted" style="text-align:center;padding:30px">暂无令牌，请先导入</td></tr>';
+  $('#selCount').textContent = selected.size ? `已选 ${selected.size} 个` : '';
+}
+function sel(id, on) { on ? selected.add(id) : selected.delete(id); $('#selCount').textContent = selected.size ? `已选 ${selected.size} 个` : ''; }
+function selAll(on) { const f = $('#tokFilter').value; tokens.filter(t => !f || (f === 'disabled' ? !t.enabled : t.enabled && t.status === f)).forEach(t => sel(t.id, on)); renderTokens(); }
+async function addTokens() {
+  const r = await api('/tokens', {method: 'POST', body: {tokens: $('#newTokens').value, name: $('#newName').value, daily_limit: +$('#newLimit').value || 0}});
+  toast(`成功导入 ${r.added} 个令牌`); $('#newTokens').value = ''; loadTokens();
+}
+async function patchTok(id, body) { await api('/tokens/' + id, {method: 'PATCH', body}); loadTokens(); }
+async function editTok(id) {
+  const t = tokens.find(x => x.id === id);
+  const name = prompt('备注名', t.name); if (name === null) return;
+  const lim = prompt('每日额度（0 = 使用全局默认）', t.daily_limit); if (lim === null) return;
+  await patchTok(id, {name, daily_limit: +lim || 0});
+}
+async function checkTok(id, btn) {
+  btn.disabled = true;
+  try { const r = await api(`/tokens/${id}/check`, {method: 'POST'}); toast((r.ok ? '✅ ' : '❌ ') + r.message); loadTokens(); }
+  catch (e) { toast(e.message); } finally { btn.disabled = false; }
+}
+async function checkAll() {
+  const b = $('#checkAllBtn'); b.disabled = true; b.textContent = '检测中…';
+  try { const r = await api('/tokens/check-all', {method: 'POST'}); toast(`检测完成：有效 ${r.ok}，异常 ${r.failed}`); loadTokens(); }
+  catch (e) { toast(e.message); } finally { b.disabled = false; b.textContent = '全部检测'; }
+}
+async function batch(action) {
+  if (!selected.size) return toast('请先勾选令牌');
+  if (action === 'delete' && !confirm(`确认删除 ${selected.size} 个令牌？`)) return;
+  const r = await api('/tokens/batch', {method: 'POST', body: {ids: [...selected], action}});
+  toast(`已处理 ${r.affected} 个`); if (action === 'delete') selected.clear(); loadTokens();
+}
+
+// ---------- API 密钥 ----------
+let keys = [];
+async function loadKeys() {
+  const d = await api('/keys'); keys = (d.data || []).sort((a, b) => a.id - b.id);
+  $('#staticKeys').textContent = d.static_count ? `另有 ${d.static_count} 个环境变量 API_KEYS 静态密钥` : '';
+  $('#keyBody').innerHTML = keys.map(k => `<tr><td>${k.id}</td><td>${esc(k.name) || '-'}</td>
+    <td class="mono">${esc(k.key)} <button class="btn sm" onclick="copy('${k.key}')">复制</button></td>
+    <td>${k.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge">禁用</span>'}</td>
+    <td>${k.used_total}</td><td>${ago(k.last_used_at)}</td><td>${fmtT(k.created_at)}</td>
+    <td class="row" style="flex-wrap:nowrap"><button class="btn sm" onclick="patchKey(${k.id},{enabled:${!k.enabled}})">${k.enabled ? '禁用' : '启用'}</button>
+    <button class="btn sm danger" onclick="delKey(${k.id})">删除</button></td></tr>`).join('') ||
+    '<tr><td colspan="8" class="muted" style="text-align:center;padding:30px">暂无密钥，创建一个用于调用接口</td></tr>';
+}
+async function createKey() { const k = await api('/keys', {method: 'POST', body: {name: $('#keyName').value}}); copy(k.key); $('#keyName').value = ''; loadKeys(); }
+async function patchKey(id, body) { await api('/keys/' + id, {method: 'PATCH', body}); loadKeys(); }
+async function delKey(id) { if (confirm('确认删除该密钥？使用它的客户端将立即无法调用')) { await api('/keys/' + id, {method: 'DELETE'}); loadKeys(); } }
+function copy(s) { navigator.clipboard?.writeText(s).then(() => toast('已复制到剪贴板'), () => prompt('复制：', s)); }
+
+// ---------- 日志 ----------
+let logPage = 0;
+async function loadLogs() {
+  const size = 50, d = await api(`/logs?limit=${size}&offset=${logPage * size}&status=${$('#logStatus').value}`);
+  $('#logInfo').textContent = `共 ${d.total} 条 · 第 ${logPage + 1}/${Math.max(1, Math.ceil(d.total / size))} 页`;
+  $('#logBody').innerHTML = (d.data || []).map(l => `<tr><td>${fmtT(l.ts)}</td><td>${l.endpoint}</td><td>${esc(l.model)}</td><td class="muted">${esc(l.upstream_model)}</td>
+    <td>${l.size}</td><td>${l.status === 200 ? '<span class="badge ok">200</span>' : `<span class="badge bad">${l.status}</span>`}</td>
+    <td>${(l.latency_ms / 1000).toFixed(1)}s</td><td>${l.attempts}</td><td>${esc(l.key) || '-'}</td><td class="mono">${esc(l.token) || '-'}</td>
+    <td class="err" title="${esc(l.error)}">${esc(l.error) || ''}</td></tr>`).join('') ||
+    '<tr><td colspan="11" class="muted" style="text-align:center;padding:30px">暂无日志</td></tr>';
+}
+
+// ---------- 在线测试 ----------
+async function loadPlay() {
+  if (!keys.length) { const d = await api('/keys'); keys = d.data || []; }
+  const v = $('#pKey').value;
+  $('#pKey').innerHTML = keys.filter(k => k.enabled).map(k => `<option value="${k.key}">${esc(k.name || '密钥 #' + k.id)} (${k.key.slice(0, 10)}…)</option>`).join('') || '<option value="">请先在「API 密钥」创建密钥</option>';
+  if (v) $('#pKey').value = v;
+}
+async function play() {
+  const key = $('#pKey').value; if (!key) return toast('请先创建 API 密钥');
+  const btn = $('#pBtn'), t0 = Date.now(); btn.disabled = true; $('#pMsg').textContent = '生成中，2K 大图约需 10~60 秒…';
+  try {
+    const r = await fetch('/v1/images/generations', {method: 'POST', headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + key},
+      body: JSON.stringify({model: $('#pModel').value, prompt: $('#pPrompt').value, size: $('#pSize').value, quality: $('#pQuality').value, output_format: $('#pFormat').value, n: +$('#pN').value || 1})});
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error?.message || 'HTTP ' + r.status);
+    const mime = j.output_format === 'jpeg' ? 'image/jpeg' : 'image/png';
+    $('#pImgs').innerHTML = j.data.map(d => `<a href="data:${mime};base64,${d.b64_json}" download="image.${j.output_format === 'jpeg' ? 'jpg' : 'png'}"><img src="data:${mime};base64,${d.b64_json}"></a>`).join('') + $('#pImgs').innerHTML;
+    $('#pMsg').textContent = `✅ 完成 ${j.data.length} 张 · ${j.size} · ${j.quality} · 耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s · usage ${j.usage.total_tokens} tokens`;
+  } catch (e) { $('#pMsg').textContent = '❌ ' + e.message; } finally { btn.disabled = false; }
+}
+
+// ---------- 文档 ----------
+async function loadDocs() {
+  const c = await api('/config'), base = location.origin;
+  $('#docBody').innerHTML = `
+  <p>Base URL：<code class="mono">${base}/v1</code>　鉴权：<code class="mono">Authorization: Bearer sk-xxx</code>（在「API 密钥」创建）</p>
+  <p>模型映射：${Object.entries(c.model_map).map(([k, v]) => `<code class="mono">${esc(k)}</code> → ${esc(v)}`).join('，')}；改图模型：<code class="mono">${esc(c.edit_model)}</code>；其它模型名原样透传给 Gitee AI。</p>
+  <p>质量档位 → 推理步数：${Object.entries(c.quality_steps).map(([k, v]) => `${k}=${v}`).join('，')}；尺寸 auto = ${c.default_size}，最长边 ${c.max_side}，自动 16 对齐。</p>
+  <p>令牌池：单令牌每日 ${c.daily_limit || '不限'} 张，单令牌并发 ${c.token_concurrency}，失败换令牌重试 ${c.max_retries} 次，排队超时 ${c.queue_timeout_sec}s。</p>
+  <h4>文生图 POST /v1/images/generations</h4>
+<pre>curl ${base}/v1/images/generations \\
+  -H "Authorization: Bearer sk-xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-image-2",
+    "prompt": "一只可爱的柴犬，水彩风格",
+    "size": "1024x1536",
+    "quality": "high",
+    "n": 1,
+    "output_format": "png"
+  }'</pre>
+  <p class="muted">支持参数：model, prompt, n(1-10), size(auto|WxH), quality(auto|low|medium|high|standard|hd), response_format(b64_json|url), output_format(png|jpeg|webp), output_compression, background, stream；扩展参数：negative_prompt, num_inference_steps, guidance_scale, seed。</p>
+  <h4>图片编辑 POST /v1/images/edits</h4>
+<pre>curl ${base}/v1/images/edits \\
+  -H "Authorization: Bearer sk-xxx" \\
+  -F model=gpt-image-2 \\
+  -F "image[]=@input.png" \\
+  -F prompt="把背景换成海边日落"</pre>
+  <h4>Python（OpenAI SDK）</h4>
+<pre>from openai import OpenAI
+import base64
+
+client = OpenAI(base_url="${base}/v1", api_key="sk-xxx")
+img = client.images.generate(model="gpt-image-2", prompt="赛博朋克风格的城市夜景", size="1536x1024")
+open("out.png", "wb").write(base64.b64decode(img.data[0].b64_json))</pre>
+  <h4>流式 stream=true（SSE）</h4>
+<pre>event: image_generation.completed
+data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","quality":"medium","output_format":"png","usage":{...}}</pre>`;
+}
+
+// 启动：探测登录状态
+api('/config').then(() => { $('#appView').classList.remove('hide'); go(location.hash.slice(1) || 'overview'); }).catch(() => {});
+</script>
+</body>
+</html>
