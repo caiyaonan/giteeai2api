@@ -236,3 +236,10 @@ data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","
 
 本项目基于 [MIT License](./LICENSE) 开源。
 
+---
+
+## 致谢与社区
+
+感谢 [LINUX DO](https://linux.do/) 社区（真诚、友善、团结、专业，共建你我引以为荣之社区）的开源氛围与技术交流支持。
+
+
