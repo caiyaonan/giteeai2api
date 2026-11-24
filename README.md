@@ -39,10 +39,10 @@
 
 - **OpenAI Images API 深度兼容（模拟 `gpt-image-2`）**
   - `POST /v1/images/generations`：支持 `gpt-image-2`、`gpt-image-1.5`、`gpt-image-1`、`gpt-image-1-mini`、`dall-e-3`、`dall-e-2` 自动映射至 `z-image-turbo`（未命中映射的模型名原样透传给上游，支持 `MODEL_MAP` 自定义）。
-  - 支持 `n`（1~10 并发生成）、`size`（`auto` 或任意 `WxH`，自动 16 对齐并等比缩放至 `MAX_SIDE`）、`quality`（`low`/`medium`/`high`/`auto`/`standard`/`hd` 映射推理步数）、`output_format`（`png`/`jpeg` 转码）、`output_compression`、`response_format`（`b64_json` / `url` 本地临时直链）、`stream=true`（OpenAI SSE 事件流）与 `usage` Token 估算。
+  - 支持 `n`（1~10 并发生成）、`size`（`auto` 或 `WxH`，最大 **`2048×2048`**，超出等比缩放并自动 16 对齐）、`quality`（`low`/`medium`/`high`/`auto`/`standard`/`hd` 映射推理步数）、`output_format`（`png`/`jpeg` 转码）、`output_compression`、`response_format`（`b64_json` / `url` 本地临时直链）、`stream=true`（OpenAI SSE 事件流）与 `usage` Token 估算。
   - 兼容扩展参数：`negative_prompt`、`num_inference_steps`、`guidance_scale`、`seed`。
-  - `POST /v1/images/edits`：同时支持 `multipart/form-data` 和 JSON（`image_url` / Data URL），默认映射至 `Qwen-Image-Edit`。
   - `GET /v1/models`：返回可用模型列表，开箱接入各类 OpenAI 客户端与 SDK。
+  - 仅支持文生图，`POST /v1/images/edits` 将直接返回 `400 unsupported_endpoint`（不消耗上游令牌）。
 - **高并发令牌池与智能故障转移**
   - 最小在途数优先 + 轮询调度，支持单令牌并发上限与排队超时控制。
   - 每日额度统计（默认 100 张/天，北京时间 0 点自动清零并恢复 `exhausted` 状态令牌）。
@@ -107,12 +107,40 @@ go build -trimpath -ldflags="-s -w" -o giteeai2api ./cmd/giteeai2api
 
 ---
 
-## 接口调用示例
+## API 接口文档
 
-Base URL：`http://localhost:8080/v1`  
-鉴权：`Authorization: Bearer sk-your-key`（或 `x-api-key: sk-your-key`）
+- **Base URL**：`http://localhost:8080/v1`
+- **鉴权方式**：`Authorization: Bearer sk-your-key`（或 `x-api-key: sk-your-key`）
+- **尺寸限制**：最大 **`2048×2048`**（由 `MAX_SIDE` 控制，单边最小 `256`，超出上限按原比例等比缩放，宽高自动对齐 16 的倍数，宽高比不超过 `3:1`）
 
-### cURL（文生图）
+### 端点一览
+
+| 方法与路径 | 状态 | 说明 |
+| --- | --- | --- |
+| `POST /v1/images/generations` | 支持 | 文生图（兼容 OpenAI `gpt-image-2` / `dall-e-3` 规范，支持 SSE 流式） |
+| `GET /v1/models` | 支持 | 返回可用模型列表 |
+| `POST /v1/images/edits` | **不支持** | 不允许图片编辑；已鉴权请求直接返回 `400`（`code: "unsupported_endpoint"`），不请求上游、不消耗令牌 |
+| `GET /healthz` | 支持 | 健康检查，返回 `{"status":"ok","version":"...","commit":"..."}` |
+
+### 文生图参数说明（`POST /v1/images/generations`）
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `prompt` | string | **必填** | 画面描述提示词，支持中英文，最长 32000 字符 |
+| `model` | string | `gpt-image-2` | 支持 `gpt-image-2` / `gpt-image-1.5` / `gpt-image-1` / `gpt-image-1-mini` / `dall-e-3` / `dall-e-2`（映射至 `z-image-turbo`），其它值原样透传 |
+| `size` | string | `1024x1024` | `auto` 或 `WxH`，最大 **`2048x2048`**。常用 2K 推荐：`2048x2048`、`2048x1536`、`1536x2048`、`2048x1360`、`1360x2048`、`2048x1152`、`1152x2048`；OpenAI 常用：`1024x1024`、`1536x1024`、`1024x1536` |
+| `quality` | string | `medium` | `auto` / `standard` → `medium`（9 步）；`low`（6 步）；`high` / `hd`（12 步） |
+| `n` | int | `1` | 并发生成张数，范围 `1`~`10` |
+| `response_format` | string | `b64_json` | `b64_json`（Base64 编码）或 `url`（本服务临时图片直链，按 `IMAGE_TTL_HOURS` 过期清理） |
+| `output_format` | string | `png` | `png` 或 `jpeg`（支持自动转码）；`webp` 保留上游原格式 |
+| `output_compression` | int | `90` | JPEG 压缩质量（`1`~`100`），仅 `output_format=jpeg` 生效 |
+| `stream` | bool | `false` | 设为 `true` 时启用 SSE 流式返回，每完成一张立即推送 |
+| `negative_prompt` | string | *(可选)* | 扩展参数：负面提示词 |
+| `num_inference_steps` | int | *(可选)* | 扩展参数：显式指定推理步数（覆盖 `quality` 映射） |
+| `guidance_scale` | float | *(可选)* | 扩展参数：引导系数（CFG） |
+| `seed` | int64 | *(可选)* | 扩展参数：随机种子 |
+
+### cURL 调用示例
 
 ```bash
 curl http://localhost:8080/v1/images/generations \
@@ -121,21 +149,37 @@ curl http://localhost:8080/v1/images/generations \
   -d '{
     "model": "gpt-image-2",
     "prompt": "一只戴着宇航员头盔的橘猫漂浮在太空中，电影级光影，超高清",
-    "size": "1536x1024",
+    "size": "2048x1536",
     "quality": "high",
     "output_format": "png",
     "n": 1
   }'
 ```
 
-### cURL（图片编辑）
+### 响应示例（JSON）
 
-```bash
-curl http://localhost:8080/v1/images/edits \
-  -H "Authorization: Bearer sk-your-key" \
-  -F "model=gpt-image-2" \
-  -F "image[]=@input.png" \
-  -F "prompt=把背景换成海边日落"
+```json
+{
+  "created": 1763960000,
+  "data": [
+    {
+      "b64_json": "iVBORw0KGgoAAAANSUhEUgAA..."
+    }
+  ],
+  "background": "opaque",
+  "output_format": "png",
+  "quality": "high",
+  "size": "2048x1536",
+  "usage": {
+    "input_tokens": 24,
+    "input_tokens_details": {
+      "text_tokens": 24,
+      "image_tokens": 0
+    },
+    "output_tokens": 12480,
+    "total_tokens": 12504
+  }
+}
 ```
 
 ### Python（OpenAI SDK）
@@ -152,7 +196,7 @@ client = OpenAI(
 resp = client.images.generate(
     model="gpt-image-2",
     prompt="赛博朋克雨夜街头，霓虹倒影，8K 写实",
-    size="1024x1024",
+    size="2048x2048",
     quality="medium",
     n=1,
 )
@@ -175,7 +219,7 @@ const client = new OpenAI({
 const resp = await client.images.generate({
   model: "gpt-image-2",
   prompt: "水彩风格的中国江南古镇清晨",
-  size: "1024x1536",
+  size: "1536x2048",
   quality: "high",
 });
 
@@ -191,6 +235,30 @@ event: image_generation.completed
 data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","quality":"medium","output_format":"png","usage":{...}}
 ```
 
+### 错误响应格式与常见错误码
+
+所有错误均遵循 OpenAI 标准格式：
+
+```json
+{
+  "error": {
+    "message": "Image editing (/v1/images/edits) is not supported by this server. Only text-to-image generation (/v1/images/generations) is available.",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "unsupported_endpoint"
+  }
+}
+```
+
+| HTTP 状态 | `error.code` | 说明 |
+| --- | --- | --- |
+| `400` | `invalid_json` / `invalid_value` | 请求体格式错误或参数超出范围（如 `n` 不在 1~10、宽高比超 3:1） |
+| `400` | `unsupported_endpoint` | 调用了不支持的 `/v1/images/edits` |
+| `401` | `invalid_api_key` | 客户端 API Key 缺失、错误或已禁用 |
+| `429` | `rate_limit_exceeded` | 令牌池全忙且排队超时（`QUEUE_TIMEOUT_SEC`） |
+| `502` | `upstream_error` | 上游调用重试后仍然失败 |
+| `503` | `no_available_token` | 令牌池中没有可用令牌（均已用尽、失效或被禁用） |
+
 ---
 
 ## 环境变量配置
@@ -199,7 +267,8 @@ data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","
 
 | 变量名 | 默认值 | 说明 |
 | --- | --- | --- |
-| `ADDR` | `:8080` | 服务监听地址 |
+| `PORT` | `8080` | Docker Compose 宿主机映射端口（Docker 部署改此项即可） |
+| `ADDR` | `:8080` | 本地直接运行二进制时的监听地址（Docker 内固定 `:8080`） |
 | `DATA_DIR` | `./data` | SQLite 数据库与临时图片存储目录 |
 | `ADMIN_PASSWORD` | `admin123` | 管理后台登录密码（**部署前务必修改**） |
 | `API_KEYS` | *(空)* | 静态客户端密钥，逗号分隔（也可在后台动态管理） |
@@ -224,6 +293,8 @@ data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","
 
 ## 兼容边界说明
 
+- **图片编辑（`/v1/images/edits`）**：不支持图片编辑，请求该端点将直接返回 `400`（`code: "unsupported_endpoint"`），不消耗上游令牌。
+- **最大分辨率**：受上游限制最大支持 `2048×2048`（超出时自动等比缩放至 `MAX_SIDE` 以内并按 16 对齐）。
 - **透明背景**：上游模型不支持透明通道，`background=transparent` 将回退为 `opaque` 并在响应中如实返回。
 - **WebP 编码**：`output_format=png` / `jpeg` 支持自动转码与压缩；`webp` 暂不重新编码，会保留上游原格式并在响应 `output_format` 中如实标明。
 

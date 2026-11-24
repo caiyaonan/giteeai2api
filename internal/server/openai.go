@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -11,9 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
-	"net/textproto"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -429,208 +426,13 @@ func (s *Server) handleGenerations(w http.ResponseWriter, hr *http.Request) {
 	s.respond(w, hr, &r, s.runJobs(hr.Context(), &r, meta, call, nil), 0)
 }
 
-type filePart struct {
-	name  string
-	ctype string
-	data  []byte
-}
-
 func (s *Server) handleEdits(w http.ResponseWriter, hr *http.Request) {
-	keyID, ok := s.keys.Auth(hr)
-	if !ok {
+	if _, ok := s.keys.Auth(hr); !ok {
 		writeErr(w, 401, "invalid_request_error", "invalid_api_key", "Incorrect API key provided.")
 		return
 	}
-	var r ImageReq
-	var images []filePart
-	var mask *filePart
-	var err error
-	if strings.HasPrefix(hr.Header.Get("Content-Type"), "multipart/") {
-		images, mask, err = parseMultipartEdit(hr, &r)
-	} else {
-		images, mask, err = s.parseJSONEdit(hr, &r)
-	}
-	if err != nil {
-		writeErr(w, 400, "invalid_request_error", "invalid_value", err.Error())
-		return
-	}
-	if len(images) == 0 {
-		writeErr(w, 400, "invalid_request_error", "invalid_value", "'image' is required")
-		return
-	}
-	if len(images) > 16 {
-		writeErr(w, 400, "invalid_request_error", "invalid_value", "too many images, maximum is 16")
-		return
-	}
-	sizeGiven := r.Size != "" && r.Size != "auto"
-	if err := s.normalize(&r); err != nil {
-		writeErr(w, 400, "invalid_request_error", "invalid_value", err.Error())
-		return
-	}
-	upModel := s.upstreamModel(r.Model, true)
-	fields := map[string]string{"model": upModel, "prompt": r.Prompt, "response_format": "b64_json"}
-	if sizeGiven {
-		fields["size"] = fmt.Sprintf("%dx%d", r.width, r.height)
-		fields["width"], fields["height"] = strconv.Itoa(r.width), strconv.Itoa(r.height)
-	}
-	if r.NegativePrompt != "" {
-		fields["negative_prompt"] = r.NegativePrompt
-	}
-	if r.Steps > 0 {
-		fields["num_inference_steps"] = strconv.Itoa(r.Steps)
-	}
-	if r.GuidanceScale != nil {
-		fields["guidance_scale"] = strconv.FormatFloat(*r.GuidanceScale, 'f', -1, 64)
-	}
-	if r.Seed != nil {
-		fields["seed"] = strconv.FormatInt(*r.Seed, 10)
-	}
-	body, ctype := buildMultipart(fields, images, mask)
-	call := func(ctx context.Context, token string) ([]byte, error) {
-		return s.up.Post(ctx, token, "/images/edits", ctype, body)
-	}
-	meta := logMeta{keyID: keyID, endpoint: "edits", model: r.Model, upstream: upModel, size: fmt.Sprintf("%dx%d", r.width, r.height)}
-	if r.Stream {
-		s.stream(w, &r, "image_edit", len(images), func(onDone func(int, result)) { s.runJobs(hr.Context(), &r, meta, call, onDone) })
-		return
-	}
-	s.respond(w, hr, &r, s.runJobs(hr.Context(), &r, meta, call, nil), len(images))
-}
-
-func parseMultipartEdit(hr *http.Request, r *ImageReq) ([]filePart, *filePart, error) {
-	if err := hr.ParseMultipartForm(64 << 20); err != nil {
-		return nil, nil, fmt.Errorf("invalid multipart body: %v", err)
-	}
-	f := hr.MultipartForm
-	get := func(k string) string {
-		if v := f.Value[k]; len(v) > 0 {
-			return strings.TrimSpace(v[0])
-		}
-		return ""
-	}
-	r.Model, r.Prompt, r.Size, r.Quality = get("model"), get("prompt"), get("size"), get("quality")
-	r.ResponseFormat, r.OutputFormat, r.Background = get("response_format"), get("output_format"), get("background")
-	r.NegativePrompt = get("negative_prompt")
-	r.N, _ = strconv.Atoi(get("n"))
-	r.Steps, _ = strconv.Atoi(get("num_inference_steps"))
-	r.Stream = get("stream") == "true"
-	if v, err := strconv.Atoi(get("output_compression")); err == nil {
-		r.OutputCompression = &v
-	}
-	if v, err := strconv.ParseFloat(get("guidance_scale"), 64); err == nil {
-		r.GuidanceScale = &v
-	}
-	if v, err := strconv.ParseInt(get("seed"), 10, 64); err == nil {
-		r.Seed = &v
-	}
-	read := func(fh *multipart.FileHeader) (filePart, error) {
-		file, err := fh.Open()
-		if err != nil {
-			return filePart{}, err
-		}
-		defer file.Close()
-		b, err := io.ReadAll(file)
-		return filePart{name: fh.Filename, ctype: http.DetectContentType(b), data: b}, err
-	}
-	var images []filePart
-	for _, k := range []string{"image", "image[]"} {
-		for _, fh := range f.File[k] {
-			p, err := read(fh)
-			if err != nil {
-				return nil, nil, err
-			}
-			images = append(images, p)
-		}
-	}
-	var mask *filePart
-	if fhs := f.File["mask"]; len(fhs) > 0 {
-		p, err := read(fhs[0])
-		if err != nil {
-			return nil, nil, err
-		}
-		mask = &p
-	}
-	return images, mask, nil
-}
-
-func (s *Server) parseJSONEdit(hr *http.Request, r *ImageReq) ([]filePart, *filePart, error) {
-	if err := json.NewDecoder(io.LimitReader(hr.Body, 80<<20)).Decode(r); err != nil {
-		return nil, nil, fmt.Errorf("invalid JSON body: %v", err)
-	}
-	var images []filePart
-	for i, raw := range r.Images {
-		p, err := s.loadImageRef(hr.Context(), raw, fmt.Sprintf("image_%d", i))
-		if err != nil {
-			return nil, nil, err
-		}
-		images = append(images, p)
-	}
-	var mask *filePart
-	if len(r.Mask) > 0 && string(r.Mask) != "null" {
-		p, err := s.loadImageRef(hr.Context(), r.Mask, "mask")
-		if err != nil {
-			return nil, nil, err
-		}
-		mask = &p
-	}
-	return images, mask, nil
-}
-
-func (s *Server) loadImageRef(ctx context.Context, raw json.RawMessage, name string) (filePart, error) {
-	var ref string
-	if json.Unmarshal(raw, &ref) != nil {
-		var obj struct {
-			ImageURL string `json:"image_url"`
-			URL      string `json:"url"`
-			FileID   string `json:"file_id"`
-		}
-		json.Unmarshal(raw, &obj)
-		if obj.FileID != "" {
-			return filePart{}, errors.New("file_id is not supported, use image_url (data URL or http URL)")
-		}
-		ref = obj.ImageURL + obj.URL
-	}
-	var b []byte
-	var err error
-	switch {
-	case strings.HasPrefix(ref, "data:"):
-		_, enc, _ := strings.Cut(ref, ",")
-		b, err = base64.StdEncoding.DecodeString(enc)
-	case strings.HasPrefix(ref, "http://"), strings.HasPrefix(ref, "https://"):
-		b, err = s.up.Download(ctx, ref)
-	case ref != "":
-		b, err = base64.StdEncoding.DecodeString(ref)
-	default:
-		err = errors.New("empty image reference")
-	}
-	if err != nil {
-		return filePart{}, fmt.Errorf("invalid image %s: %v", name, err)
-	}
-	ct := http.DetectContentType(b)
-	return filePart{name: name + "." + extOf(detectFormat(b)), ctype: ct, data: b}, nil
-}
-
-func buildMultipart(fields map[string]string, images []filePart, mask *filePart) ([]byte, string) {
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	for k, v := range fields {
-		mw.WriteField(k, v)
-	}
-	add := func(field string, p filePart) {
-		h := textproto.MIMEHeader{}
-		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, field, strings.ReplaceAll(p.name, `"`, "")))
-		h.Set("Content-Type", p.ctype)
-		pw, _ := mw.CreatePart(h)
-		pw.Write(p.data)
-	}
-	for _, p := range images {
-		add("image", p)
-	}
-	if mask != nil {
-		add("mask", *mask)
-	}
-	mw.Close()
-	return buf.Bytes(), mw.FormDataContentType()
+	writeErr(w, 400, "invalid_request_error", "unsupported_endpoint",
+		"Image editing (/v1/images/edits) is not supported by this server. Only text-to-image generation (/v1/images/generations) is available.")
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, hr *http.Request) {

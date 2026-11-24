@@ -9,7 +9,6 @@ import (
 	"image/color"
 	"image/png"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -198,22 +197,18 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("unexpected sse body: %s", sseBody)
 	}
 
-	var mbuf bytes.Buffer
-	mw := multipart.NewWriter(&mbuf)
-	mw.WriteField("model", "gpt-image-2")
-	mw.WriteField("prompt", "add a hat")
-	fw, _ := mw.CreateFormFile("image[]", "in.png")
-	fw.Write(samplePNG)
-	mw.Close()
-	editReq, _ := http.NewRequest("POST", srv.URL+"/v1/images/edits", &mbuf)
+	// /v1/images/edits 不允许编辑，直接返回 400 unsupported_endpoint 且不消耗令牌
+	editReq, _ := http.NewRequest("POST", srv.URL+"/v1/images/edits", strings.NewReader(`{}`))
 	editReq.Header.Set("Authorization", "Bearer "+keyRes.Key)
-	editReq.Header.Set("Content-Type", mw.FormDataContentType())
 	r, err = hc.Do(editReq)
-	if err != nil || r.StatusCode != 200 {
-		b, _ := io.ReadAll(r.Body)
-		t.Fatalf("edits failed: %v status=%d body=%s", err, r.StatusCode, b)
+	if err != nil || r.StatusCode != 400 {
+		t.Fatalf("expected 400 for /v1/images/edits, got err=%v status=%v", err, r)
 	}
+	editBody, _ := io.ReadAll(r.Body)
 	r.Body.Close()
+	if !strings.Contains(string(editBody), "unsupported_endpoint") {
+		t.Fatalf("unexpected edits error body: %s", editBody)
+	}
 
 	time.Sleep(150 * time.Millisecond)
 	r = adminReq("GET", "/admin/api/overview", "")
@@ -229,8 +224,8 @@ func TestEndToEnd(t *testing.T) {
 	if ov.Pool.Active != 1 || ov.Pool.Invalid != 1 || ov.Pool.Exhausted != 1 {
 		t.Fatalf("unexpected pool summary: %+v", ov.Pool)
 	}
-	if ov.Today.Success != 5 {
-		t.Fatalf("expected 5 successful images today, got %+v", ov.Today)
+	if ov.Today.Success != 4 {
+		t.Fatalf("expected 4 successful images today, got %+v", ov.Today)
 	}
 }
 

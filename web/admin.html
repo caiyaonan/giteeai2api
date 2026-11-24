@@ -410,29 +410,51 @@ async function play() {
 async function loadDocs() {
   const c = await api('/config'), base = location.origin;
   $('#docBody').innerHTML = `
-  <p>Base URL：<code class="mono">${base}/v1</code>　鉴权：<code class="mono">Authorization: Bearer sk-xxx</code>（在「API 密钥」创建）</p>
-  <p>模型映射：${Object.entries(c.model_map).map(([k, v]) => `<code class="mono">${esc(k)}</code> → ${esc(v)}`).join('，')}；改图模型：<code class="mono">${esc(c.edit_model)}</code>；其它模型名原样透传给 Gitee AI。</p>
-  <p>质量档位 → 推理步数：${Object.entries(c.quality_steps).map(([k, v]) => `${k}=${v}`).join('，')}；尺寸 auto = ${c.default_size}，最长边 ${c.max_side}，自动 16 对齐。</p>
-  <p>令牌池：单令牌每日 ${c.daily_limit || '不限'} 张，单令牌并发 ${c.token_concurrency}，失败换令牌重试 ${c.max_retries} 次，排队超时 ${c.queue_timeout_sec}s。</p>
-  <h4>文生图 POST /v1/images/generations</h4>
+  <p><b>Base URL</b>：<code class="mono">${base}/v1</code>　<b>鉴权</b>：<code class="mono">Authorization: Bearer sk-xxx</code>（或 <code class="mono">x-api-key: sk-xxx</code>，在「API 密钥」创建）</p>
+  <p><b>模型映射</b>：${Object.entries(c.model_map).map(([k, v]) => `<code class="mono">${esc(k)}</code> → ${esc(v)}`).join('，')}；未命中映射的模型名原样透传给 Gitee AI。</p>
+  <p><b>尺寸限制</b>：最大支持 <b>${c.max_side}×${c.max_side}</b>（单边最小 256，超出 ${c.max_side} 自动等比缩放，宽高自动 16 对齐，宽高比 ≤ 3:1）；<code class="mono">size=auto</code> 或省略时默认 <code class="mono">${c.default_size}</code>。</p>
+  <p><b>质量档位 → 推理步数</b>：${Object.entries(c.quality_steps).map(([k, v]) => `${k}=${v}`).join('，')}；<b>令牌池</b>：单令牌每日 ${c.daily_limit || '不限'} 张，单令牌并发 ${c.token_concurrency}，失败换令牌重试 ${c.max_retries} 次。</p>
+
+  <h4>接口一览</h4>
+  <div class="tbl"><table>
+    <thead><tr><th>方法与路径</th><th>状态</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">POST /v1/images/generations</td><td><span class="badge ok">支持</span></td><td>文生图（兼容 OpenAI gpt-image-2 / dall-e-3，支持 SSE 流式）</td></tr>
+      <tr><td class="mono">GET /v1/models</td><td><span class="badge ok">支持</span></td><td>获取可用模型列表</td></tr>
+      <tr><td class="mono">POST /v1/images/edits</td><td><span class="badge bad">不支持</span></td><td>不允许图片编辑，请求将直接返回 <code class="mono">400 unsupported_endpoint</code>（不消耗令牌）</td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>请求参数（POST /v1/images/generations）</h4>
+  <div class="tbl"><table>
+    <thead><tr><th>参数</th><th>类型</th><th>默认值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">prompt</td><td>string</td><td>必填</td><td>画面描述提示词（支持中英文，最长 32000 字符）</td></tr>
+      <tr><td class="mono">model</td><td>string</td><td class="mono">gpt-image-2</td><td>模型名，默认映射至 <code class="mono">${esc(c.default_model)}</code></td></tr>
+      <tr><td class="mono">size</td><td>string</td><td class="mono">${c.default_size}</td><td><code class="mono">auto</code> 或 <code class="mono">WxH</code>，最大 <b>${c.max_side}×${c.max_side}</b>。推荐：1024x1024 / 1536x1024 / 1024x1536 / 2048x2048 / 2048x1536 / 1536x2048 / 2048x1152 / 1152x2048</td></tr>
+      <tr><td class="mono">quality</td><td>string</td><td class="mono">medium</td><td><code class="mono">auto</code> / <code class="mono">low</code> / <code class="mono">medium</code> / <code class="mono">high</code> / <code class="mono">standard</code> / <code class="mono">hd</code></td></tr>
+      <tr><td class="mono">n</td><td>int</td><td>1</td><td>并发生成张数，范围 1~10</td></tr>
+      <tr><td class="mono">response_format</td><td>string</td><td class="mono">b64_json</td><td><code class="mono">b64_json</code>（Base64）或 <code class="mono">url</code>（本地临时直链）</td></tr>
+      <tr><td class="mono">output_format</td><td>string</td><td class="mono">png</td><td><code class="mono">png</code> / <code class="mono">jpeg</code>（支持转码）；<code class="mono">webp</code> 保留上游原格式</td></tr>
+      <tr><td class="mono">output_compression</td><td>int</td><td>90</td><td>JPEG 压缩质量（1~100，仅 <code class="mono">jpeg</code> 生效）</td></tr>
+      <tr><td class="mono">stream</td><td>bool</td><td>false</td><td>是否以 SSE 流式返回，每完成一张即推送</td></tr>
+      <tr><td class="mono">negative_prompt / num_inference_steps / guidance_scale / seed</td><td>扩展</td><td>可选</td><td>透传给 Gitee AI 上游的高级推理参数</td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>cURL 调用示例</h4>
 <pre>curl ${base}/v1/images/generations \\
   -H "Authorization: Bearer sk-xxx" \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-image-2",
     "prompt": "一只可爱的柴犬，水彩风格",
-    "size": "1024x1536",
+    "size": "2048x1536",
     "quality": "high",
     "n": 1,
     "output_format": "png"
   }'</pre>
-  <p class="muted">支持参数：model, prompt, n(1-10), size(auto|WxH), quality(auto|low|medium|high|standard|hd), response_format(b64_json|url), output_format(png|jpeg|webp), output_compression, background, stream；扩展参数：negative_prompt, num_inference_steps, guidance_scale, seed。</p>
-  <h4>图片编辑 POST /v1/images/edits</h4>
-<pre>curl ${base}/v1/images/edits \\
-  -H "Authorization: Bearer sk-xxx" \\
-  -F model=gpt-image-2 \\
-  -F "image[]=@input.png" \\
-  -F prompt="把背景换成海边日落"</pre>
+
   <h4>Python（OpenAI SDK）</h4>
 <pre>from openai import OpenAI
 import base64
@@ -440,9 +462,31 @@ import base64
 client = OpenAI(base_url="${base}/v1", api_key="sk-xxx")
 img = client.images.generate(model="gpt-image-2", prompt="赛博朋克风格的城市夜景", size="1536x1024")
 open("out.png", "wb").write(base64.b64decode(img.data[0].b64_json))</pre>
-  <h4>流式 stream=true（SSE）</h4>
+
+  <h4>响应示例 &amp; 流式 SSE</h4>
+<pre>{
+  "created": 1763960000,
+  "data": [{ "b64_json": "iVBORw0KGgo..." }],
+  "background": "opaque",
+  "output_format": "png",
+  "quality": "high",
+  "size": "2048x1536",
+  "usage": { "input_tokens": 12, "output_tokens": 12480, "total_tokens": 12492 }
+}</pre>
 <pre>event: image_generation.completed
-data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","quality":"medium","output_format":"png","usage":{...}}</pre>`;
+data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","quality":"medium","output_format":"png","usage":{...}}</pre>
+
+  <h4>常见错误码</h4>
+  <div class="tbl"><table>
+    <thead><tr><th>HTTP 状态</th><th>error.code</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>400</td><td class="mono">invalid_value / unsupported_endpoint</td><td>参数不合法，或调用了不支持的 <code class="mono">/v1/images/edits</code></td></tr>
+      <tr><td>401</td><td class="mono">invalid_api_key</td><td>客户端 API Key 缺失、错误或已禁用</td></tr>
+      <tr><td>429</td><td class="mono">rate_limit_exceeded</td><td>令牌池全忙且排队超时，请稍后重试</td></tr>
+      <tr><td>502</td><td class="mono">upstream_error</td><td>上游重试后仍失败</td></tr>
+      <tr><td>503</td><td class="mono">no_available_token</td><td>令牌池中无可用令牌（均已用尽/失效/禁用）</td></tr>
+    </tbody>
+  </table></div>`;
 }
 
 // 启动：探测登录状态
