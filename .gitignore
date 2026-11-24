@@ -1,7 +1,7 @@
-data/
-.env
-giteeai2api
-giteeai2api.exe
+/data/
+/.env
+/giteeai2api
+/giteeai2api.exe
 *.db
 *.db-wal
 *.db-shm

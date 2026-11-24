@@ -1,8 +1,8 @@
 .git
-.env
-data/
-giteeai2api
-giteeai2api.exe
+/.env
+/data/
+/giteeai2api
+/giteeai2api.exe
 *.db
 *.db-wal
 *.db-shm
