@@ -114,7 +114,7 @@ func env(k, d string) string {
 }
 
 func envInt(k string, d int) int {
-	if v, err := strconv.Atoi(os.Getenv(k)); err == nil {
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(k))); err == nil {
 		return v
 	}
 	return d
