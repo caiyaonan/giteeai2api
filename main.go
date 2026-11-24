@@ -36,7 +36,9 @@ func main() {
 	mux.HandleFunc("POST /v1/images/edits", app.handleEdits)
 	mux.HandleFunc("GET /v1/models", app.handleModels)
 	mux.Handle("GET /images/", http.StripPrefix("/images/", noDirFS(filepath.Join(cfg.DataDir, "images"))))
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"status": "ok", "version": Version, "commit": Commit})
+	})
 
 	// 管理后台
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/admin", http.StatusFound) })
@@ -68,7 +70,7 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	go func() {
-		log.Printf("giteeai2api listening on %s, tokens=%d, admin=/admin", cfg.Addr, len(app.pool.List()))
+		log.Printf("giteeai2api %s (%s) listening on %s, tokens=%d, admin=/admin", Version, Commit, cfg.Addr, len(app.pool.List()))
 		if cfg.AdminPassword == "admin123" {
 			log.Println("WARNING: 使用默认管理员密码 admin123，请设置 ADMIN_PASSWORD")
 		}
@@ -81,8 +83,8 @@ func main() {
 	<-sig
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	srv.Shutdown(ctx)
-	time.Sleep(300 * time.Millisecond) // 等待异步写入落盘
+	_ = srv.Shutdown(ctx)
+	store.Close() // 刷干异步写入队列并执行 WAL checkpoint
 }
 
 // cors 允许浏览器直接调用 /v1 接口

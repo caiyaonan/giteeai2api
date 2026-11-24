@@ -2,15 +2,21 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-const schema = `
+// migrations 按顺序执行，索引 i 对应将数据库升级到 user_version = i+1。
+// 后续版本如需新增字段或索引，只需在切片末尾追加一条幂等/增量 SQL。
+var migrations = []string{
+	// v1: 初始表结构
+	`
 CREATE TABLE IF NOT EXISTS tokens(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL DEFAULT '',
@@ -50,13 +56,18 @@ CREATE TABLE IF NOT EXISTS logs(
   error TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);
-`
+`,
+}
 
 // Store：读写分离。写入走单协程批量事务，避免高并发下 SQLite 锁竞争。
 type Store struct {
-	r  *sql.DB
-	w  *sql.DB
-	ch chan func(*sql.Tx)
+	r         *sql.DB
+	w         *sql.DB
+	ch        chan func(*sql.Tx)
+	done      chan struct{}
+	closeOnce sync.Once
+	mu        sync.RWMutex
+	closed    bool
 }
 
 func openStore(dir string) *Store {
@@ -70,21 +81,55 @@ func openStore(dir string) *Store {
 		log.Fatal(err)
 	}
 	w.SetMaxOpenConns(1)
-	if _, err := w.Exec(schema); err != nil {
-		log.Fatal("init schema: ", err)
+	if err := migrate(w); err != nil {
+		log.Fatal("migrate db: ", err)
 	}
 	r, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
 	r.SetMaxOpenConns(8)
-	s := &Store{r: r, w: w, ch: make(chan func(*sql.Tx), 8192)}
+	s := &Store{r: r, w: w, ch: make(chan func(*sql.Tx), 8192), done: make(chan struct{})}
 	go s.writer()
 	return s
 }
 
+func migrate(db *sql.DB) error {
+	var cur int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&cur); err != nil {
+		return err
+	}
+	if cur > len(migrations) {
+		return fmt.Errorf("database schema version %d is newer than binary (%d), please upgrade", cur, len(migrations))
+	}
+	for i := cur; i < len(migrations); i++ {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(migrations[i]); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration v%d failed: %w", i+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, i+1)); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		log.Printf("db migrated to schema v%d", i+1)
+	}
+	return nil
+}
+
 // Async 异步写入（日志、计数等允许毫秒级延迟落盘的数据）
 func (s *Store) Async(fn func(*sql.Tx)) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return
+	}
 	select {
 	case s.ch <- fn:
 	default:
@@ -92,7 +137,22 @@ func (s *Store) Async(fn func(*sql.Tx)) {
 	}
 }
 
+// Close 刷干所有待写入事务、执行 WAL checkpoint 并关闭数据库连接
+func (s *Store) Close() {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		close(s.ch)
+		s.mu.Unlock()
+		<-s.done
+		_, _ = s.w.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+		_ = s.r.Close()
+		_ = s.w.Close()
+	})
+}
+
 func (s *Store) writer() {
+	defer close(s.done)
 	for fn := range s.ch {
 		tx, err := s.w.Begin()
 		if err != nil {
@@ -105,7 +165,10 @@ func (s *Store) writer() {
 	drain:
 		for i := 0; i < 500; i++ {
 			select {
-			case f := <-s.ch:
+			case f, ok := <-s.ch:
+				if !ok {
+					break drain
+				}
 				f(tx)
 			default:
 				break drain

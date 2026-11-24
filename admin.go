@@ -378,6 +378,7 @@ func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	c := a.cfg
 	writeJSON(w, 200, map[string]any{
+		"version": Version, "commit": Commit, "build_time": BuildTime,
 		"upstream_base": c.UpstreamBase, "default_model": c.DefaultModel, "edit_model": c.EditModel,
 		"model_map": c.ModelMap, "daily_limit": c.DailyLimit, "token_concurrency": c.TokenConcurrency,
 		"max_retries": c.MaxRetries, "queue_timeout_sec": int(c.QueueTimeout.Seconds()),

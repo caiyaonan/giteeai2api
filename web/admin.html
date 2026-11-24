@@ -55,7 +55,7 @@ pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padd
 
 <div id="appView" class="hide">
 <header>
-  <h1>🎨 GiteeAI2API</h1>
+  <h1>🎨 GiteeAI2API <span id="verBadge" class="badge mono" style="font-weight:400;margin-left:4px"></span></h1>
   <nav id="nav">
     <a data-tab="overview" class="on">概览</a><a data-tab="tokens">令牌池</a><a data-tab="keys">API 密钥</a>
     <a data-tab="logs">请求日志</a><a data-tab="play">在线测试</a><a data-tab="docs">接口文档</a>
@@ -196,8 +196,12 @@ async function api(path, opt = {}) {
 }
 function showLogin() { $('#loginView').classList.remove('hide'); $('#appView').classList.add('hide'); }
 async function login() {
-  try { await api('/login', {method: 'POST', body: {password: $('#pwd').value}}); $('#loginView').classList.add('hide'); $('#appView').classList.remove('hide'); go('overview'); }
-  catch (e) { toast(e.message); }
+  try {
+    await api('/login', {method: 'POST', body: {password: $('#pwd').value}});
+    const c = await api('/config');
+    if (c.version) { $('#verBadge').textContent = c.version; $('#verBadge').title = [c.version, c.commit, c.build_time].filter(Boolean).join(' · '); }
+    $('#loginView').classList.add('hide'); $('#appView').classList.remove('hide'); go('overview');
+  } catch (e) { toast(e.message); }
 }
 async function logout() { await api('/logout', {method: 'POST'}); showLogin(); }
 
@@ -442,7 +446,10 @@ data: {"type":"image_generation.completed","b64_json":"...","size":"1024x1024","
 }
 
 // 启动：探测登录状态
-api('/config').then(() => { $('#appView').classList.remove('hide'); go(location.hash.slice(1) || 'overview'); }).catch(() => {});
+api('/config').then(c => {
+  if (c.version) { $('#verBadge').textContent = c.version; $('#verBadge').title = [c.version, c.commit, c.build_time].filter(Boolean).join(' · '); }
+  $('#appView').classList.remove('hide'); go(location.hash.slice(1) || 'overview');
+}).catch(() => {});
 </script>
 </body>
 </html>

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"image"
@@ -69,8 +70,7 @@ func newTestServer(t *testing.T, upstreamHandler http.HandlerFunc) (*App, *httpt
 	cleanup := func() {
 		srv.Close()
 		upSrv.Close()
-		store.r.Close()
-		store.w.Close()
+		store.Close()
 	}
 	return app, srv, cleanup
 }
@@ -250,5 +250,28 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if ov.Today.Success != 5 {
 		t.Fatalf("expected 5 successful images today, got %+v", ov.Today)
+	}
+}
+
+func TestStoreMigrationAndGracefulClose(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(dir)
+	var ver int
+	if err := s.r.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != len(migrations) {
+		t.Fatalf("expected schema version %d, got %d (err=%v)", len(migrations), ver, err)
+	}
+	for i := 0; i < 20; i++ {
+		s.Async(func(tx *sql.Tx) {
+			execTx(tx, `INSERT INTO logs(ts,endpoint,model,status) VALUES(1,'generations','gpt-image-2',200)`)
+		})
+	}
+	s.Close() // 必须等全部异步写入刷盘完成
+
+	// 重新打开确认 20 条记录全部持久化
+	s2 := openStore(dir)
+	defer s2.Close()
+	var cnt int
+	if err := s2.r.QueryRow(`SELECT COUNT(*) FROM logs`).Scan(&cnt); err != nil || cnt != 20 {
+		t.Fatalf("expected 20 persisted logs after Close, got %d (err=%v)", cnt, err)
 	}
 }
